@@ -1,5 +1,5 @@
 name: swadrive
-description: "A new Flutter project."
+description: "Flutter client for the SwaDrive personal cloud."
 publish_to: 'none'
 version: 0.1.0+1
 

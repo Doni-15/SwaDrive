@@ -1,0 +1,46 @@
+# Secrets and signing material
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Local databases and backups
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.bak
+*.backup
+
+# Logs
+*.log
+
+# Go build and test output
+server/bin/
+server/dist/
+*.test
+coverage.out
+coverage/
+
+# Flutter and Dart generated output
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS metadata
+.DS_Store
+Thumbs.db
