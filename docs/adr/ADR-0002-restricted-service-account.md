@@ -12,18 +12,17 @@ filesystem access.
 
 ## Decision
 
-Run the Go backend as the dedicated Linux identity
-`personalcloud_service`, not as `root` or `admin_home_server`.
+Run the Go backend as a dedicated restricted Linux service account, not as
+`root` or the human administrator account.
 
-The service account has UID/GID 988, home `/var/lib/personalcloud`, shell
-`/usr/sbin/nologin`, no sudo, no interactive or SSH login, and no Tailscale
-administration. It may write only the application storage, state, and log paths
-that require runtime mutation and may read administrator-provided configuration
-as needed.
+The service account uses a non-interactive shell, has no sudo, interactive or
+SSH login, and has no Tailscale administration. It may write only the
+application storage, state, and log paths that require runtime mutation and may
+read administrator-provided configuration as needed.
 
-The production binary remains administrator-owned under `/opt/personalcloud`,
-and configuration remains administrator-controlled under `/etc/personalcloud`.
-The runtime account must not be able to replace its own executable.
+The production binary remains administrator-owned under a release directory,
+and configuration remains administrator-controlled under a separate config
+directory. The runtime account must not be able to replace its own executable.
 
 ## Consequences
 

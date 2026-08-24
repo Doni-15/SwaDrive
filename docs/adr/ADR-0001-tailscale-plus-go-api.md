@@ -26,9 +26,9 @@ SSH/SCP            administrator-only bootstrap and deployment
 ```
 
 The initial API prefix is `/api/v1` and the initial listener is TCP 8080. The
-intended Tailscale grant permits the normal Member identity
-`kanhantam3@gmail.com` to reach `tag:storage-server` on TCP 8080 only. Flutter
-clients remain normal Member devices.
+intended Tailscale grant permits only an explicitly selected normal Member
+identity to reach the tagged storage server on TCP 8080. Flutter clients remain
+normal Member devices.
 
 Tailscale Serve is not required by this decision. HTTPS termination and the
 resumable-upload protocol may be evaluated later without changing the boundary

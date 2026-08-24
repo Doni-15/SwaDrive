@@ -22,10 +22,10 @@ published a release yet.
   `GET /api/v1/health`; the endpoint returns HTTP 200 with `{"status":"ok"}`.
 - Verified `go test ./...`, `go vet ./...`, and `go test -race ./...`.
 - Built a statically linked Linux amd64 production artifact with CGO disabled
-  from commit `83b7c73` and a clean VCS build state.
-- Installed the root-owned binary under `/opt/personalcloud` and
-  deployed it as the enabled, active `swadrive.service` running as
-  `personalcloud_service`.
+  from a clean VCS build state.
+- Installed an administrator-owned binary under a dedicated release directory
+  and deployed it as an enabled systemd service running as the restricted
+  service account.
 - Verified service restart and reboot persistence and health access through
   MagicDNS and direct Tailscale IPv4, while direct Ethernet access to the
   application port remains blocked.
@@ -35,8 +35,8 @@ published a release yet.
 - Established the Debian 13 server baseline, separated human administration
   from the restricted backend runtime identity, and created the production
   filesystem layout with least-privilege ownership.
-- Rebuilt the Tailscale foundation around `tag:storage-server`, normal Member
-  clients, MagicDNS, and the intended TCP 8080 grant.
+- Rebuilt the Tailscale foundation around a tagged storage server, normal
+  Member clients, MagicDNS, and a narrowly scoped application-port grant.
 - Selected the Arch Linux workstation for all development and removed Go, Git,
   and the temporary source workspace from production.
 

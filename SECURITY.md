@@ -24,7 +24,7 @@ High-priority areas include:
 - authentication and authorization bypass;
 - path traversal or symlink escape;
 - unintended file disclosure or modification;
-- privilege escalation beyond `personalcloud_service`;
+- privilege escalation beyond the restricted service account;
 - session/token leakage or revocation failure;
 - unsafe upload processing;
 - unintended network exposure.

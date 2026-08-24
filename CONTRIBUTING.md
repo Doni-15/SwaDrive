@@ -7,7 +7,7 @@ SwaDrive is early in development. Before changing code, read the root
 
 - Keep the monorepo rooted at `client/` and `server/`.
 - Do not conflate Linux, Tailscale, application, and service identities.
-- Do not run the backend as `root` or `admin_home_server`.
+- Do not run the backend as `root` or the human administrator account.
 - Do not turn client devices into Tailscale administrators or server-tagged
   machines.
 - Keep SSH/SCP for administration only; application traffic uses the Go HTTP
