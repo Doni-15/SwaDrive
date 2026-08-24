@@ -15,3 +15,6 @@ in the root [README](../../README.md).
 New ADRs should include status, context, decision, and consequences. A changed
 decision should supersede an earlier ADR rather than silently rewriting its
 history.
+- [ADR-0003](ADR-0003-application-authentication-and-sessions.md): application
+  authentication remains separate from Tailscale and uses Argon2id passwords
+  with opaque, independently revocable server-side sessions.

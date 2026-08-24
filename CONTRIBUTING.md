@@ -19,6 +19,32 @@ SwaDrive is early in development. Before changing code, read the root
 Architecture changes that conflict with an accepted ADR require a new ADR that
 explicitly supersedes the old decision.
 
+## Backend Engineering Standards
+
+The backend uses a lightweight Clean Architecture with feature-oriented
+packages such as `internal/auth`, `internal/database`, and `internal/httpapi`.
+The primary dependency flow is Handler -> Service -> Repository -> Storage:
+
+- handlers parse and validate HTTP input, call services, and translate results
+  into HTTP responses; they do not query SQLite;
+- services contain application rules without HTTP types, raw SQL, or knowledge
+  of SQLite implementation details;
+- repositories define real persistence boundaries required by services; their
+  storage implementations own SQL and contain no HTTP behavior;
+- `cmd/server/main.go` is limited to startup, composition, and dependency
+  wiring.
+
+Use explicit constructor injection and put interfaces only at genuine
+boundaries or test seams. Keep code directly testable, with tests near the code
+they verify. Centralize security-sensitive work such as password hashing and
+session-token generation. Apply DRY to real shared concepts, not coincidental
+small similarities, and do not create speculative package trees or
+`utils`, `helpers`, `common`, or `misc` dumping grounds.
+
+Development, dependency management, migrations, tests, and builds happen on
+the workstation. Production receives reviewed build artifacts and runtime
+configuration only; it is not a source-development environment.
+
 ## Development Checks
 
 Run checks for the area changed.
