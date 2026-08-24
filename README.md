@@ -8,11 +8,13 @@ SwaDrive is a private, self-hosted personal cloud for browsing and transferring 
 
 **As of:** 2026-08-24
 
-**Current phase:** Phase 3 - Go Foundation (**IN PROGRESS**)
+**Latest completed phase:** Phase 3 - Go Foundation (**COMPLETE**)
+
+**Next roadmap phase:** Phase 4 - Application Authentication (**NOT STARTED**)
 
 This document uses these labels deliberately:
 
-- **VERIFIED** means the state was already checked on the relevant machine or service before this repository cleanup.
+- **VERIFIED** means the state was checked on the relevant machine or service and supplied as verified project state.
 - **CURRENT REPOSITORY** means the state is directly visible in this repository.
 - **PLANNED** means a design direction or roadmap item that is not implemented yet.
 
@@ -22,14 +24,17 @@ This document uses these labels deliberately:
 | --- | --- | --- |
 | Clean rebuild | **COMPLETE** | Linux administration and legacy Tailscale state were cleaned up. |
 | Server foundation | **COMPLETE** | Restricted runtime identity and production filesystem paths were verified. |
-| Tailscale foundation | **COMPLETE** | Server tag, Member clients, MagicDNS, and intended TCP 8080 policy were verified. |
-| Go foundation | **IN PROGRESS** | Go module exists; no Go server source or endpoint exists yet. |
+| Tailscale foundation | **COMPLETE** | Server tag, Member clients, MagicDNS, and the locked TCP 8080 authorization boundary were verified. |
+| Go foundation | **COMPLETE** | The tested health endpoint is deployed under systemd as the restricted runtime identity and is reachable over Tailscale. |
 | Application authentication | **NOT STARTED** | Design direction only. |
 | File API | **NOT STARTED** | Design direction only. |
 | Flutter MVP | **NOT STARTED** | Generated Flutter scaffold exists, but product features are not implemented. |
 | Large files, sync, hardening | **NOT STARTED** | Long-term requirements and roadmap only. |
 
-No backend has been deployed by this repository cleanup. Production deployment, systemd service creation, and the health endpoint remain incomplete.
+The Phase 3 backend foundation is deployed. `swadrive.service` is enabled and
+active, and `GET http://storage-server:8080/api/v1/health` returns HTTP 200 with
+`{"status":"ok"}` over Tailscale. Application authentication, file APIs, and
+Flutter product features remain not started.
 
 ## Technology Stack
 
@@ -37,11 +42,11 @@ No backend has been deployed by this repository cleanup. Production deployment, 
 | --- | --- | --- |
 | Production OS | Debian GNU/Linux 13 (trixie) | **VERIFIED** |
 | Private network | Tailscale | **VERIFIED foundation** |
-| Backend | Go HTTP API | **PLANNED; module initialized** |
+| Backend | Go HTTP API | **VERIFIED Phase 3 foundation** |
 | Client | Flutter for Linux and Android | **CURRENT scaffold** |
 | Initial database | SQLite | **PLANNED** |
 | File storage | Linux filesystem, not database BLOBs | **LOCKED direction** |
-| Service manager | systemd | **VERIFIED host service manager; SwaDrive unit PLANNED** |
+| Service manager | systemd | **VERIFIED; `swadrive.service` enabled and active** |
 | Development OS | Arch Linux | **VERIFIED** |
 
 ## Goals
@@ -90,11 +95,12 @@ Tailscale control plane
 | admin-owned release artifact and configuration       |
 |                 |                                    |
 |                 v                                    |
-| Go HTTP API on TCP 8080                 PLANNED       |
+| Go HTTP API on TCP 8080                 DEPLOYED      |
 | runs as personalcloud_service                        |
 |        |                       |                     |
 |        v                       v                     |
 | SQLite/application state      Linux filesystem       |
+| PLANNED                       foundation verified    |
 | /var/lib/personalcloud        /srv/personalcloud     |
 +---------------------------+--------------------------+
                             ^
@@ -157,7 +163,8 @@ This application identity is not any Linux account, Tailscale account, or machin
 
 ## Verified Current State
 
-The following records describe the last verified external state supplied to the project. They were not re-queried or modified during repository cleanup.
+The following records describe the verified external state supplied to the
+project. They were not re-queried or modified during this documentation update.
 
 ### Production server
 
@@ -169,9 +176,12 @@ The following records describe the last verified external state supplied to the 
 | Machine identity | `tag:storage-server` |
 | Operating mode | Headless/TTY-oriented; default target `multi-user.target` |
 | Package state | Cleanup complete; no residual package configurations observed |
-| systemd state | No failed units observed after cleanup |
+| systemd state | `swadrive.service` enabled and active; restart and full-reboot validation passed; no failed units observed |
 | Active foundation services | `ssh`, `nftables`, `tailscaled`, `wpa_supplicant` |
-| Application listener | TCP 8080 was verified free before deployment work |
+| Application listener | Go HTTP API on TCP 8080 |
+| Health endpoint | `GET /api/v1/health` returns HTTP 200 with `{"status":"ok"}` through MagicDNS and direct Tailscale IPv4 access |
+| Installed binary | `/opt/personalcloud/swadrive-server`, owned by `root:root`, mode `0755`; executable but not writable by `personalcloud_service` |
+| Production artifact | Statically linked Linux amd64 binary built with `CGO_ENABLED=0` from commit `83b7c73` with a clean VCS build state |
 | Development tools | Go, Git, and the temporary development workspace were removed |
 
 Cleanup removed unnecessary laptop, reporting, Bluetooth, and development
@@ -205,8 +215,8 @@ authority for `swadrive`.
 
 ## Tailscale Network Design
 
-Phase 2 is complete. The intended access rule is narrowly scoped to the
-specific Member identity, the tagged server, and the initial API port:
+The Tailscale authorization rule remains narrowly scoped to the specific
+Member identity, the tagged server, and the application port:
 
 ```json
 {
@@ -231,7 +241,19 @@ kanhantam3@gmail.com devices
 tag:storage-server
 ```
 
-Do not broaden this grant to all Members without an explicit architecture decision. Tailscale Serve is not mandatory; the initial design is a Go listener on TCP 8080 reachable only under the intended Tailscale policy.
+The host nftables default-drop policy remains in place. Its persistent and live
+application-path rule permits new TCP 8080 connections only through
+`tailscale0`:
+
+```nft
+iifname "tailscale0" tcp dport 8080 ct state new accept
+```
+
+MagicDNS and direct Tailscale IPv4 access to the health endpoint return HTTP
+200, while direct Ethernet access to TCP 8080 is blocked. Do not
+broaden the Tailscale grant to all Members without an explicit architecture
+decision. Tailscale Serve is not mandatory; the deployed foundation uses a Go
+listener on TCP 8080 under the locked Tailscale authorization boundary.
 
 ## Server Filesystem and Ownership
 
@@ -360,7 +382,9 @@ SwaDrive/
 |   |-- pubspec.yaml
 |   `-- pubspec.lock
 |-- server/
-|   `-- go.mod                      Go module initialized
+|   |-- cmd/server/main.go          Go HTTP server entry point
+|   |-- cmd/server/main_test.go     Health endpoint test
+|   `-- go.mod                      Go module
 |-- docs/
 |   `-- adr/                        Durable architecture decisions only
 |-- .github/
@@ -387,14 +411,15 @@ The local checkout may be named `personal-cloud`; this does not change the produ
 | Flutter directory | `client/` |
 | Android application ID | `id.donirs.swadrive` |
 
-The next backend structure should stay minimal:
+The backend foundation remains intentionally minimal:
 
 ```text
 server/
 |-- go.mod
 `-- cmd/
     `-- server/
-        `-- main.go
+        |-- main.go
+        `-- main_test.go
 ```
 
 Packages under `server/internal/` and migrations under `server/migrations/` should be added only when working code needs them. Flutter should likewise evolve from the current `client/lib/main.dart` toward feature-oriented boundaries only as features appear.
@@ -423,13 +448,13 @@ Packages under `server/internal/` and migrations under `server/migrations/` shou
 
 The MVP succeeds when authenticated Linux and Android clients can perform the core file operations through the Go API; the backend starts under systemd as `personalcloud_service`; no direct filesystem, SSH, or unrelated server-port access is required by the clients; and deletion is recoverable through trash.
 
-## Backend and API Direction - PLANNED
+## Backend and API
 
-Initial API prefix: `/api/v1`
+API prefix: `/api/v1`
 
-Initial listener: TCP `8080`
+Listener: TCP `8080`
 
-The first endpoint will be:
+The deployed Phase 3 endpoint is:
 
 ```http
 GET /api/v1/health
@@ -441,7 +466,9 @@ GET /api/v1/health
 }
 ```
 
-That endpoint is **not implemented yet**. Later health behavior may report readiness, storage availability, maintenance state, and free-space checks, but the first implementation should remain small and testable.
+It returns HTTP 200 with `{"status":"ok"}` and has a focused automated handler
+test. It is a minimal process-health endpoint; application authentication and
+file operations are not implemented.
 
 Future endpoint direction:
 
@@ -551,7 +578,7 @@ All source editing, dependency management, tests, and builds happen on the Arch 
 
 ### Backend
 
-From `server/`, as code appears:
+From `server/`:
 
 ```bash
 gofmt -w cmd/server/main.go
@@ -577,34 +604,58 @@ Use Flutter tooling to manage generated Android and Linux structures. Keep `clie
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing changes.
 
-## Deployment Model - PLANNED
+## Deployment Model
 
 ```text
 edit/test/build on doni-arch
           |
           v
-Linux amd64 artifact + checksum
+statically linked Linux amd64 artifact
           |
           | administrator SSH/SCP
           v
-install under /opt/personalcloud on swadrive
-          |
-          v
-administrator-managed config in /etc/personalcloud
+install /opt/personalcloud/swadrive-server as root:root, mode 0755
           |
           v
 systemd starts backend as personalcloud_service
 ```
 
-The production host receives release artifacts, not the development workspace. A future deployment must verify the checksum, ownership, runtime user, listening port, health endpoint, restart behavior, and reboot persistence. Rollback and database migration procedures must be defined before changes that need them.
+The Phase 3 artifact is a statically linked Linux amd64 binary built with
+`CGO_ENABLED=0` from Git commit `83b7c73` with `vcs.modified=false`. The
+production host receives the release artifact, not the development workspace,
+and does not require Git or a Go compiler.
 
-No systemd unit, production config, or deployed binary is present in this repository today.
+The root-owned binary cannot be modified by
+`personalcloud_service`. The enabled `swadrive.service` unit uses the following
+verified runtime contract:
 
-## Testing Strategy - PLANNED
+| Setting | Value |
+| --- | --- |
+| `User` / `Group` | `personalcloud_service` |
+| `WorkingDirectory` | `/var/lib/personalcloud` |
+| `ExecStart` | `/opt/personalcloud/swadrive-server` |
+| `Restart` | `on-failure` |
+| `WantedBy` | `multi-user.target` |
 
-Test depth should grow with the implementation and risk:
+Restart and full-reboot validation passed, with the service returning to the
+active/running state. Rollback and database migration procedures must be
+defined before changes that need them.
 
-- **Go unit/handler tests:** health response, authentication, version compatibility, errors, and request cancellation.
+## Testing Strategy
+
+The Phase 3 automated health test is tracked at
+`server/cmd/server/main_test.go`. The verified backend checks all pass from
+`server/`:
+
+```text
+go test ./...
+go vet ./...
+go test -race ./...
+```
+
+Test depth should continue to grow with implementation and risk:
+
+- **Go unit/handler tests:** authentication, version compatibility, errors, and request cancellation.
 - **Filesystem security tests:** `..`, absolute paths, encoded traversal, null bytes, symlink escape, root enforcement, and permission failures.
 - **Authentication tests:** correct/wrong password, disabled users, expiration, revocation, rate limiting, and token-log redaction.
 - **File API tests:** listing, upload/download, conflicts, rename/move, trash/restore, search, and interrupted operations.
@@ -613,7 +664,7 @@ Test depth should grow with the implementation and risk:
 - **Deployment tests:** correct runtime user, filesystem access boundaries, listener exposure, restart, reboot, rollback, backup, and restore.
 - **Tailscale verification:** Member clients, server tag, MagicDNS, TCP 8080 reachability, unintended-port denial, and no unintended admins.
 
-There are currently no backend packages or backend tests. The Flutter scaffold includes the Flutter test dependency but currently has no tracked test files.
+The Flutter scaffold includes the Flutter test dependency but currently has no tracked test files.
 
 ## Roadmap
 
@@ -673,7 +724,7 @@ The checkboxes below record verified project state, not aspirational completion.
 
 ### Phase 3 - Go Foundation
 
-**STATUS: IN PROGRESS**
+**STATUS: COMPLETE**
 
 - [x] choose doni-arch as development workstation
 - [x] verify Go on development workstation
@@ -685,25 +736,28 @@ The checkboxes below record verified project state, not aspirational completion.
 - [x] remove Go compiler from production server
 - [x] remove Git from production server
 - [x] remove server-side development workspace
-- [ ] create server/cmd/server/main.go
-- [ ] implement GET /api/v1/health
-- [ ] run backend locally on Arch
-- [ ] add initial backend tests
-- [ ] build Linux amd64 production artifact
-- [ ] generate/check artifact checksum
-- [ ] transfer artifact to swadrive
-- [ ] install binary into /opt/personalcloud
+- [x] create server/cmd/server/main.go
+- [x] implement GET /api/v1/health
+- [x] run backend locally on Arch
+- [x] add initial backend tests
+- [x] build Linux amd64 production artifact
+- [x] generate/check artifact checksum
+- [x] transfer artifact to swadrive
+- [x] install binary into /opt/personalcloud
 - [ ] create server config under /etc/personalcloud
-- [ ] create systemd unit
-- [ ] run systemd service as personalcloud_service
-- [ ] confirm process does not run as root
-- [ ] test health endpoint through Tailscale
-- [ ] verify unintended ports are not exposed
+- [x] create systemd unit
+- [x] run systemd service as personalcloud_service
+- [x] confirm process does not run as root
+- [x] test health endpoint through Tailscale
+- [x] verify unintended ports are not exposed
 - [ ] add initial systemd hardening
-- [ ] test restart behavior
-- [ ] test reboot persistence
+- [x] test restart behavior
+- [x] test reboot persistence
 
 **Exit criteria:** `GET http://storage-server:8080/api/v1/health` returns `200 OK`, and the backend process runs as `personalcloud_service`.
+
+Unchecked items above remain unverified or deferred; they are not marked
+complete merely because the phase exit criteria passed.
 
 ### Phase 4 - Application Authentication
 
@@ -824,7 +878,8 @@ The checkboxes below record verified project state, not aspirational completion.
 
 ## Current Next Step
 
-Create `server/cmd/server/main.go`, implement `GET /api/v1/health` with the minimal `{"status":"ok"}` response, and add focused handler tests before any production deployment work.
+Phase 3 is complete. Phase 4 - Application Authentication is the next roadmap
+phase and remains **NOT STARTED**.
 
 ## Architecture Decisions
 
