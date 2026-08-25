@@ -29,6 +29,24 @@ High-priority areas include:
 - unsafe upload processing;
 - unintended network exposure.
 
+The current backend uses Argon2id password hashes and stores only SHA-256
+digests of opaque session tokens. It does not provide application-level
+encryption for user files or SQLite and does not terminate TLS itself. Private
+transport is intended to be supplied and independently verified through the
+later Tailscale deployment. Reports should not describe hashing as encryption.
+
+The `.swadrive-volume` marker is an application identity check, not proof that
+the intended HDD is mounted. Missing production mount/ownership/systemd
+controls are deployment findings and remain important even when source tests
+pass.
+
+The database flock coordinates cooperating SwaDrive processes; it is not a
+security boundary against a malicious same-UID process. SQLite requires a
+service-writable state area for its DB/WAL/SHM files. Production must separately
+keep the mounted storage root and marker administrator-controlled while making
+only the `files/`, `uploads/`, and `trash/` content boundary writable by the
+runtime account. Exact permission modes remain deployment work.
+
 ## Sensitive Information
 
 Never submit live auth keys, passwords, private keys, raw session tokens,

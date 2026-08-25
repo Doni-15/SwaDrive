@@ -62,6 +62,21 @@ default to eight, active uploads are capped at 100 per user, and each upload is
 capped at 1,000,000 chunks. With the smallest chunk this still permits roughly
 1 TiB; larger chunk selections permit proportionally larger files.
 
+Creation necessarily has a narrow filesystem-before-SQLite window in which an
+internal `.part` can exist without an upload row. It is never published or
+visible through metadata APIs. Recovery is an explicit offline local-admin
+operation: `reconcile-upload-parts` first reports a dry-run, scans only the
+internal uploads directory in bounded batches, and considers only strict
+lowercase 128-bit-hex `.part` names that are regular files, older than the
+configured minimum age, and absent from SQLite. Deletion requires `-apply`.
+The command never reads content or prints internal names/host paths. A scan-limit
+failure performs no partial deletion.
+
+If cancel/expiration removes a known part and the process dies before updating
+SQLite, a restarted expiration cleanup treats the missing part as already
+removed and durably expires the known pending row. It never creates an index
+entry.
+
 Downloads use standard HTTP byte Range behavior rather than a separate
 download-session protocol.
 

@@ -59,6 +59,22 @@ marked unhealthy and metadata reads fail closed until explicit reindex. Startup
 reconciliation examines only durable trash and `finalizing` upload records in
 bounded batches; it never performs a general HDD scan.
 
+Mkdir and move also persist a small unhealthy mutation intent before their
+filesystem step. Their successful index+audit transaction clears the matching
+intent; a safely compensated failure clears it afterward. A process death at
+either side of the filesystem/SQLite boundary leaves the intent durable.
+After the intent commits, SQLite finalization and intent clearing use short,
+bounded contexts detached from request cancellation. A disconnected client
+alone therefore cannot strand an otherwise repaired operation; failure of the
+bounded internal repair still leaves the index unhealthy and fail-closed.
+Targeted trash/upload reconciliation runs first, then startup requires a healthy
+index before serving HTTP. An unresolved mkdir/move intent therefore fails
+startup closed until an administrator runs explicit generation-based reindex.
+The intent detects the disagreement without scanning the HDD at startup.
+
+Single-process coordination and storage-root identity binding are governed by
+[ADR-0006](ADR-0006-process-coordination-and-storage-identity.md).
+
 Backend v1 indexes metadata only. It does not extract document text, EXIF,
 thumbnails, media frames, embeddings, faces, or background full-file hashes.
 The bundled pure-Go SQLite includes FTS5, but ordinary parameterized metadata
@@ -82,6 +98,9 @@ search is used to avoid a second synchronized index for the initial product.
   disagreement remains possible across crashes; the backend detects known
   states, compensates where safe, and fails closed rather than claiming perfect
   consistency.
+- An unresolved durable mkdir/move intent makes startup and metadata unavailable
+  until explicit reindex; availability is traded for not serving known-stale
+  metadata.
 
 ## Alternatives Rejected
 

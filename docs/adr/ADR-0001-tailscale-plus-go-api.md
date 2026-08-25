@@ -30,9 +30,15 @@ intended Tailscale grant permits only an explicitly selected normal Member
 identity to reach the tagged storage server on TCP 8080. Flutter clients remain
 normal Member devices.
 
-Tailscale Serve is not required by this decision. HTTPS termination and the
-resumable-upload protocol may be evaluated later without changing the boundary
-between private network access and application authorization.
+Tailscale Serve is not required by this decision. Backend v1 implements its
+resumable-upload protocol over the Go HTTP API. HTTPS termination may be
+evaluated later without changing the boundary between private network access
+and application authorization.
+
+Backend v1 does not terminate TLS in the Go process. Transport confidentiality
+therefore depends on the later deployment actually using and verifying the
+intended Tailscale path and ACLs. This is not an application-level encryption
+claim and does not provide encryption at rest for files or SQLite.
 
 ## Consequences
 
