@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -32,14 +33,35 @@ func main() {
 		err = run(ctx, configuration, logger)
 	}
 	if err != nil {
-		logger.Error("server stopped", "error", err)
+		logStartupFailure(logger, err)
 		os.Exit(1)
 	}
+}
+
+func logStartupFailure(logger *slog.Logger, err error) {
+	category := "startup_failure"
+	switch {
+	case errors.Is(err, database.ErrProcessLockBusy):
+		category = "database_in_use"
+	case errors.Is(err, storage.ErrStorageVolumeRequired), errors.Is(err, storage.ErrStorageVolumeMismatch), errors.Is(err, storage.ErrDifferentFilesystem):
+		category = "storage_validation"
+	case errors.Is(err, files.ErrIndexInconsistent):
+		category = "metadata_inconsistent"
+	}
+	// Startup errors can wrap administrator-controlled physical paths. Keep the
+	// operational log useful at a high level without exporting those paths.
+	logger.Error("server stopped", "error_type", category)
 }
 
 func run(parentContext context.Context, configuration config.Server, logger *slog.Logger) error {
 	ctx, cancel := context.WithCancel(parentContext)
 	defer cancel()
+
+	processLock, err := database.AcquireProcessLock(configuration.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer processLock.Close()
 
 	db, err := database.Open(ctx, configuration.DatabasePath)
 	if err != nil {
@@ -50,7 +72,10 @@ func run(parentContext context.Context, configuration config.Server, logger *slo
 		return err
 	}
 
-	storageManager, err := storage.Open(configuration.StorageRoot)
+	storageManager, err := storage.OpenVerified(
+		configuration.StorageRoot,
+		configuration.StorageVolumeID,
+	)
 	if err != nil {
 		return err
 	}
@@ -75,6 +100,9 @@ func run(parentContext context.Context, configuration config.Server, logger *slo
 	if _, err := uploadService.ReconcileFinalizing(ctx); err != nil {
 		return err
 	}
+	if err := fileIndexRepository.CheckHealthy(ctx); err != nil {
+		return errors.Join(files.ErrIndexInconsistent, err)
+	}
 
 	handler := httpapi.NewHandler(httpapi.Dependencies{
 		Auth:    authService,
@@ -96,9 +124,11 @@ func run(parentContext context.Context, configuration config.Server, logger *slo
 		logger.Info("SwaDrive server listening", "address", server.Addr)
 		serverErrors <- server.ListenAndServe()
 	}()
-	cleanupErrors := make(chan error, 1)
+	cleanupDone := make(chan struct{})
+	var cleanupError error
 	go func() {
-		cleanupErrors <- uploadService.RunCleanup(ctx, configuration.UploadCleanupInterval)
+		defer close(cleanupDone)
+		cleanupError = uploadService.RunCleanup(ctx, configuration.UploadCleanupInterval)
 	}()
 
 	var runError error
@@ -108,9 +138,9 @@ func run(parentContext context.Context, configuration config.Server, logger *slo
 		if !errors.Is(err, http.ErrServerClosed) {
 			runError = err
 		}
-	case err := <-cleanupErrors:
-		if err != nil {
-			runError = err
+	case <-cleanupDone:
+		if cleanupError != nil {
+			runError = cleanupError
 		}
 	}
 
@@ -118,5 +148,13 @@ func run(parentContext context.Context, configuration config.Server, logger *slo
 	shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 	shutdownError := server.Shutdown(shutdownContext)
-	return errors.Join(runError, shutdownError)
+	// Give normal cleanup a bounded opportunity to observe cancellation before
+	// dependent resources close. An overrun fails shutdown; main then exits the
+	// process. This is deliberately not an unbounded goroutine-join guarantee.
+	select {
+	case <-cleanupDone:
+	case <-shutdownContext.Done():
+		return errors.Join(runError, shutdownError, fmt.Errorf("wait for upload cleanup worker: %w", shutdownContext.Err()))
+	}
+	return errors.Join(runError, shutdownError, cleanupError)
 }

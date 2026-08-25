@@ -85,8 +85,10 @@ type FileIndexRepository interface {
 	List(ctx context.Context, parentPath string, limit int, cursor indexCursor) ([]Entry, error)
 	Metadata(ctx context.Context, logicalPath string) (Entry, error)
 	Search(ctx context.Context, normalizedQuery string, limit int, cursor indexCursor) ([]Entry, error)
-	CreateWithAudit(ctx context.Context, entry Entry, event audit.Event) error
-	MoveSubtreeWithAudit(ctx context.Context, source, destination storage.Path, event audit.Event) error
+	BeginMutation(ctx context.Context, reason string, now time.Time) error
+	ClearMutation(ctx context.Context, reason string, now time.Time) error
+	CreateWithAuditAndRepair(ctx context.Context, entry Entry, event audit.Event, repairReason string) error
+	MoveSubtreeWithAuditAndRepair(ctx context.Context, source, destination storage.Path, event audit.Event, repairReason string) error
 	MarkUnhealthy(ctx context.Context, reason string, now time.Time) error
 }
 

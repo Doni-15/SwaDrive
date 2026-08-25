@@ -24,6 +24,9 @@ const (
 	MaximumReconciliationRun   = 1000
 	DefaultConcurrentDownloads = 32
 	MaximumConcurrentDownloads = 256
+	mkdirMutationReason        = "mkdir-pending"
+	moveMutationReason         = "move-pending"
+	mutationRepairTimeout      = 10 * time.Second
 )
 
 var (
@@ -163,24 +166,34 @@ func (service *Service) CreateDirectory(ctx context.Context, identity auth.Ident
 	}
 	unlockMutation := service.mutations.Lock()
 	defer unlockMutation()
-	if err := service.index.CheckHealthy(ctx); err != nil {
+	now := service.now().UTC()
+	if err := service.index.BeginMutation(ctx, mkdirMutationReason, now); err != nil {
 		return Entry{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return Entry{}, service.abortMutation(ctx, mkdirMutationReason, err)
 	}
 	if err := service.storage.CreateDirectory(logicalPath); err != nil {
-		return Entry{}, err
+		return Entry{}, service.abortMutation(ctx, mkdirMutationReason, err)
 	}
-	now := service.now().UTC()
 	entry, err := NewEntry(logicalPath, KindDirectory, 0, now, now, "", nil)
 	if err != nil {
-		return Entry{}, err
-	}
-	if err := service.index.CreateWithAudit(ctx, entry, service.event(identity, audit.EventFolderCreated, "folder", "", logicalPath.String(), "", nil)); err != nil {
 		compensationErr := service.storage.RemoveEmptyDirectory(logicalPath)
 		if compensationErr != nil {
-			markErr := service.index.MarkUnhealthy(ctx, "mkdir-compensation", now)
-			return Entry{}, errors.Join(ErrIndexInconsistent, err, compensationErr, markErr)
+			return Entry{}, errors.Join(ErrIndexInconsistent, err, compensationErr)
 		}
-		return Entry{}, err
+		return Entry{}, service.abortMutation(ctx, mkdirMutationReason, err)
+	}
+	event := service.event(identity, audit.EventFolderCreated, "folder", "", logicalPath.String(), "", nil)
+	err = service.runMutationRepair(ctx, func(repairContext context.Context) error {
+		return service.index.CreateWithAuditAndRepair(repairContext, entry, event, mkdirMutationReason)
+	})
+	if err != nil {
+		compensationErr := service.storage.RemoveEmptyDirectory(logicalPath)
+		if compensationErr != nil {
+			return Entry{}, errors.Join(ErrIndexInconsistent, err, compensationErr)
+		}
+		return Entry{}, service.abortMutation(ctx, mkdirMutationReason, err)
 	}
 	return entry, nil
 }
@@ -199,21 +212,46 @@ func (service *Service) Move(ctx context.Context, identity auth.Identity, source
 	}
 	unlockMutation := service.mutations.Lock()
 	defer unlockMutation()
-	if err := service.index.CheckHealthy(ctx); err != nil {
+	if err := service.index.BeginMutation(ctx, moveMutationReason, service.now().UTC()); err != nil {
 		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return service.abortMutation(ctx, moveMutationReason, err)
 	}
 	if err := service.storage.Move(source, destination); err != nil {
-		return err
+		return service.abortMutation(ctx, moveMutationReason, err)
 	}
-	if err := service.index.MoveSubtreeWithAudit(ctx, source, destination, service.event(identity, audit.EventFileMoved, "file", "", source.String(), destination.String(), nil)); err != nil {
+	event := service.event(identity, audit.EventFileMoved, "file", "", source.String(), destination.String(), nil)
+	err = service.runMutationRepair(ctx, func(repairContext context.Context) error {
+		return service.index.MoveSubtreeWithAuditAndRepair(repairContext, source, destination, event, moveMutationReason)
+	})
+	if err != nil {
 		compensationErr := service.storage.Move(destination, source)
 		if compensationErr != nil {
-			markErr := service.index.MarkUnhealthy(ctx, "move-compensation", service.now().UTC())
-			return errors.Join(ErrIndexInconsistent, err, compensationErr, markErr)
+			return errors.Join(ErrIndexInconsistent, err, compensationErr)
 		}
-		return err
+		return service.abortMutation(ctx, moveMutationReason, err)
 	}
 	return nil
+}
+
+func (service *Service) abortMutation(ctx context.Context, reason string, operationErr error) error {
+	clearErr := service.runMutationRepair(ctx, func(repairContext context.Context) error {
+		return service.index.ClearMutation(repairContext, reason, service.now().UTC())
+	})
+	if clearErr != nil {
+		return errors.Join(ErrIndexInconsistent, operationErr, clearErr)
+	}
+	return operationErr
+}
+
+func (service *Service) runMutationRepair(requestContext context.Context, repair func(context.Context) error) error {
+	// Once the durable intent exists, restoring consistency must not depend on
+	// the client remaining connected. Keep request values for tracing/audit, but
+	// bound every detached database repair so shutdown cannot wait forever.
+	repairContext, cancel := context.WithTimeout(context.WithoutCancel(requestContext), mutationRepairTimeout)
+	defer cancel()
+	return repair(repairContext)
 }
 
 func (service *Service) Trash(ctx context.Context, identity auth.Identity, pathValue string) (TrashEntry, error) {

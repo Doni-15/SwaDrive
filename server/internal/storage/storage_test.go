@@ -45,6 +45,159 @@ func TestParsePathRejectsTraversalAndInvalidComponents(t *testing.T) {
 	}
 }
 
+func TestOpenVerifiedFailsClosedBeforeInitialization(t *testing.T) {
+	rootPath := t.TempDir()
+	const volumeID = "test-volume-123"
+
+	manager, err := OpenVerified(rootPath, volumeID)
+	if manager != nil {
+		_ = manager.Close()
+		t.Fatal("OpenVerified() returned manager without volume marker")
+	}
+	if !errors.Is(err, ErrStorageVolumeMismatch) {
+		t.Fatalf("OpenVerified() error = %v; want ErrStorageVolumeMismatch", err)
+	}
+
+	for _, directory := range []string{"files", "uploads", "trash"} {
+		if _, err := os.Stat(filepath.Join(rootPath, directory)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s exists after rejected storage volume; want absent", directory)
+		}
+	}
+}
+
+func TestOpenVerifiedRequiresMatchingVolumeIdentity(t *testing.T) {
+	rootPath := t.TempDir()
+
+	if err := os.WriteFile(
+		filepath.Join(rootPath, storageVolumeMarkerName),
+		[]byte("actual-volume\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, err := OpenVerified(rootPath, "expected-volume")
+	if manager != nil {
+		_ = manager.Close()
+		t.Fatal("OpenVerified() returned manager for mismatched volume")
+	}
+	if !errors.Is(err, ErrStorageVolumeMismatch) {
+		t.Fatalf("OpenVerified() error = %v; want ErrStorageVolumeMismatch", err)
+	}
+}
+
+func TestOpenVerifiedAcceptsMatchingVolumeAndInitializesDirectories(t *testing.T) {
+	rootPath := t.TempDir()
+	const volumeID = "test-volume-456"
+
+	if err := os.WriteFile(
+		filepath.Join(rootPath, storageVolumeMarkerName),
+		[]byte(volumeID+"\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, err := OpenVerified(rootPath, volumeID)
+	if err != nil {
+		t.Fatalf("OpenVerified() error = %v", err)
+	}
+	defer manager.Close()
+
+	for _, directory := range []string{"files", "uploads", "trash"} {
+		info, err := os.Stat(filepath.Join(rootPath, directory))
+		if err != nil {
+			t.Fatalf("stat %s: %v", directory, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("%s is not a directory", directory)
+		}
+	}
+}
+
+func TestOpenVerifiedRejectsSymlinkVolumeMarker(t *testing.T) {
+	rootPath := t.TempDir()
+	const volumeID = "test-volume-789"
+
+	if err := os.WriteFile(
+		filepath.Join(rootPath, "real-marker"),
+		[]byte(volumeID+"\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(
+		"real-marker",
+		filepath.Join(rootPath, storageVolumeMarkerName),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, err := OpenVerified(rootPath, volumeID)
+	if manager != nil {
+		_ = manager.Close()
+		t.Fatal("OpenVerified() accepted symlink volume marker")
+	}
+	if !errors.Is(err, ErrStorageVolumeMismatch) {
+		t.Fatalf("OpenVerified() error = %v; want ErrStorageVolumeMismatch", err)
+	}
+}
+
+func TestOpenVerifiedRejectsMalformedOversizedAndNonregularMarkers(t *testing.T) {
+	const volumeID = "expected-volume"
+	tests := []struct {
+		name  string
+		setup func(*testing.T, string)
+	}{
+		{
+			name: "malformed",
+			setup: func(t *testing.T, rootPath string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(rootPath, storageVolumeMarkerName), []byte(volumeID+"\nextra\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "oversized",
+			setup: func(t *testing.T, rootPath string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(rootPath, storageVolumeMarkerName), []byte(strings.Repeat("a", maximumStorageVolumeIDLen+3)), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "directory",
+			setup: func(t *testing.T, rootPath string) {
+				t.Helper()
+				if err := os.Mkdir(filepath.Join(rootPath, storageVolumeMarkerName), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rootPath := t.TempDir()
+			test.setup(t, rootPath)
+			manager, err := OpenVerified(rootPath, volumeID)
+			if manager != nil {
+				_ = manager.Close()
+				t.Fatal("OpenVerified() returned a manager for an unsafe marker")
+			}
+			if !errors.Is(err, ErrStorageVolumeMismatch) {
+				t.Fatalf("OpenVerified() error = %v; want ErrStorageVolumeMismatch", err)
+			}
+			for _, directory := range []string{"files", "uploads", "trash"} {
+				if _, err := os.Stat(filepath.Join(rootPath, directory)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("%s initialized after marker rejection", directory)
+				}
+			}
+		})
+	}
+}
+
 func TestManagerUsesFilesRootAndRejectsSymlinkEscapeAndConflicts(t *testing.T) {
 	rootPath := t.TempDir()
 	manager, err := Open(rootPath)
@@ -194,6 +347,37 @@ func TestInternalNamesRejectDotComponents(t *testing.T) {
 		if !validInternalName(name) {
 			t.Fatalf("validInternalName(%q) = false", name)
 		}
+	}
+}
+
+func TestUploadPartReconciliationTraversalReturnsOnlyRegularInternalFiles(t *testing.T) {
+	rootPath := t.TempDir()
+	manager, err := Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	uploadsPath := filepath.Join(rootPath, "uploads")
+	regularName := "11111111111111111111111111111111.part"
+	if err := os.WriteFile(filepath.Join(uploadsPath, regularName), []byte("internal bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(uploadsPath, "22222222222222222222222222222222.part"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "outside"), filepath.Join(uploadsPath, "33333333333333333333333333333333.part")); err != nil {
+		t.Fatal(err)
+	}
+
+	var entries []UploadPartEntry
+	if err := manager.WalkUploadPartsForReconciliation(context.Background(), func(entry UploadPartEntry) error {
+		entries = append(entries, entry)
+		return nil
+	}); err != nil {
+		t.Fatalf("WalkUploadPartsForReconciliation() error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != regularName || entries[0].Size != int64(len("internal bytes")) {
+		t.Fatalf("upload reconciliation entries = %+v; want only regular file metadata", entries)
 	}
 }
 

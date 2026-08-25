@@ -106,6 +106,144 @@ func TestFileMutationAuditFailuresCompensateOrReconcile(t *testing.T) {
 	}
 }
 
+func TestCreateDirectoryCancellationAfterStorageDoesNotStrandIntent(t *testing.T) {
+	service, manager, db, identity, root := newFilesTestService(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	service.storage = &cancelAfterMutationStorage{
+		Storage:      manager,
+		cancelCreate: cancel,
+	}
+
+	entry, err := service.CreateDirectory(ctx, identity, "cancelled-directory")
+	if err != nil {
+		t.Fatalf("CreateDirectory() error = %v", err)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("request context error = %v; want context.Canceled", ctx.Err())
+	}
+	if entry.Path != "cancelled-directory" {
+		t.Fatalf("created entry path = %q", entry.Path)
+	}
+	if _, err := os.Stat(filepath.Join(root, "files", "cancelled-directory")); err != nil {
+		t.Fatalf("created directory missing after finalized mutation: %v", err)
+	}
+	repository := NewSQLiteFileIndexRepository(db)
+	if err := repository.CheckHealthy(context.Background()); err != nil {
+		t.Fatalf("index health after cancelled mkdir = %v", err)
+	}
+	if _, err := repository.Metadata(context.Background(), "cancelled-directory"); err != nil {
+		t.Fatalf("metadata after cancelled mkdir = %v", err)
+	}
+}
+
+func TestMoveCancellationAfterStorageDoesNotStrandIntent(t *testing.T) {
+	service, manager, db, identity, root := newFilesTestService(t)
+	writeVisibleFile(t, root, "cancelled-move-source.txt", []byte("content"))
+	reindexFiles(t, db, manager)
+	ctx, cancel := context.WithCancel(context.Background())
+	service.storage = &cancelAfterMutationStorage{
+		Storage:    manager,
+		cancelMove: cancel,
+	}
+
+	if err := service.Move(ctx, identity, "cancelled-move-source.txt", "cancelled-move-destination.txt"); err != nil {
+		t.Fatalf("Move() error = %v", err)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("request context error = %v; want context.Canceled", ctx.Err())
+	}
+	if _, err := os.Stat(filepath.Join(root, "files", "cancelled-move-source.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("move source still exists: %v", err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(root, "files", "cancelled-move-destination.txt")); err != nil || string(contents) != "content" {
+		t.Fatalf("move destination contents = %q, %v", contents, err)
+	}
+	repository := NewSQLiteFileIndexRepository(db)
+	if err := repository.CheckHealthy(context.Background()); err != nil {
+		t.Fatalf("index health after cancelled move = %v", err)
+	}
+	if _, err := repository.Metadata(context.Background(), "cancelled-move-destination.txt"); err != nil {
+		t.Fatalf("metadata after cancelled move = %v", err)
+	}
+}
+
+func TestCancelledCreateDatabaseFailureCompensatesAndClearsIntent(t *testing.T) {
+	service, manager, db, identity, root := newFilesTestService(t)
+	installFileAuditFailureTrigger(t, db)
+	defer dropFileAuditFailureTrigger(t, db)
+	ctx, cancel := context.WithCancel(context.Background())
+	service.storage = &cancelAfterMutationStorage{
+		Storage:      manager,
+		cancelCreate: cancel,
+	}
+
+	_, err := service.CreateDirectory(ctx, identity, "compensated-cancelled-directory")
+	if err == nil {
+		t.Fatal("CreateDirectory() succeeded with forced audit failure")
+	}
+	if errors.Is(err, ErrIndexInconsistent) {
+		t.Fatalf("CreateDirectory() stranded index intent: %v", err)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("request context error = %v; want context.Canceled", ctx.Err())
+	}
+	if _, err := os.Stat(filepath.Join(root, "files", "compensated-cancelled-directory")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("filesystem compensation left directory behind: %v", err)
+	}
+	repository := NewSQLiteFileIndexRepository(db)
+	if err := repository.CheckHealthy(context.Background()); err != nil {
+		t.Fatalf("index health after cancelled compensated mkdir = %v", err)
+	}
+}
+
+func TestInternalMutationRepairFailureRemainsFailClosed(t *testing.T) {
+	service, manager, db, identity, _ := newFilesTestService(t)
+	installFileAuditFailureTrigger(t, db)
+	defer dropFileAuditFailureTrigger(t, db)
+	ctx, cancel := context.WithCancel(context.Background())
+	repository := NewSQLiteFileIndexRepository(db)
+	failingRepository := &clearMutationFailureRepository{FileIndexRepository: repository}
+	service.index = failingRepository
+	service.storage = &cancelAfterMutationStorage{
+		Storage:      manager,
+		cancelCreate: cancel,
+	}
+
+	_, err := service.CreateDirectory(ctx, identity, "failed-internal-repair")
+	if !errors.Is(err, ErrIndexInconsistent) {
+		t.Fatalf("CreateDirectory() error = %v; want ErrIndexInconsistent", err)
+	}
+	if failingRepository.clearContextErr != nil {
+		t.Fatalf("ClearMutation() inherited request cancellation: %v", failingRepository.clearContextErr)
+	}
+	if err := repository.CheckHealthy(context.Background()); !errors.Is(err, ErrIndexInconsistent) {
+		t.Fatalf("index health after internal repair failure = %v; want ErrIndexInconsistent", err)
+	}
+}
+
+func TestCancellationAfterBeginClearsIntentBeforeFilesystemMutation(t *testing.T) {
+	service, manager, db, identity, _ := newFilesTestService(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	repository := NewSQLiteFileIndexRepository(db)
+	service.index = &cancelAfterBeginRepository{
+		FileIndexRepository: repository,
+		cancel:              cancel,
+	}
+	guardedStorage := &countingMutationStorage{Storage: manager}
+	service.storage = guardedStorage
+
+	_, err := service.CreateDirectory(ctx, identity, "never-created")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CreateDirectory() error = %v; want context.Canceled", err)
+	}
+	if guardedStorage.createCalls != 0 {
+		t.Fatalf("filesystem create calls = %d; want 0", guardedStorage.createCalls)
+	}
+	if err := repository.CheckHealthy(context.Background()); err != nil {
+		t.Fatalf("index health after pre-filesystem cancellation = %v", err)
+	}
+}
+
 func newFilesTestService(t *testing.T) (*Service, *storage.Manager, *sql.DB, auth.Identity, string) {
 	t.Helper()
 	base := t.TempDir()
@@ -328,6 +466,63 @@ func TestMissingIndexedDownloadFailsClosedWithoutDeletingMetadata(t *testing.T) 
 
 type moveCompensationFailureStorage struct {
 	moves int
+}
+
+type cancelAfterMutationStorage struct {
+	Storage
+	cancelCreate context.CancelFunc
+	cancelMove   context.CancelFunc
+}
+
+func (storageManager *cancelAfterMutationStorage) CreateDirectory(path storage.Path) error {
+	err := storageManager.Storage.CreateDirectory(path)
+	if err == nil && storageManager.cancelCreate != nil {
+		storageManager.cancelCreate()
+		storageManager.cancelCreate = nil
+	}
+	return err
+}
+
+func (storageManager *cancelAfterMutationStorage) Move(source, destination storage.Path) error {
+	err := storageManager.Storage.Move(source, destination)
+	if err == nil && storageManager.cancelMove != nil {
+		storageManager.cancelMove()
+		storageManager.cancelMove = nil
+	}
+	return err
+}
+
+type clearMutationFailureRepository struct {
+	FileIndexRepository
+	clearContextErr error
+}
+
+func (repository *clearMutationFailureRepository) ClearMutation(ctx context.Context, _ string, _ time.Time) error {
+	repository.clearContextErr = ctx.Err()
+	return errors.New("injected internal mutation repair failure")
+}
+
+type cancelAfterBeginRepository struct {
+	FileIndexRepository
+	cancel context.CancelFunc
+}
+
+func (repository *cancelAfterBeginRepository) BeginMutation(ctx context.Context, reason string, now time.Time) error {
+	err := repository.FileIndexRepository.BeginMutation(ctx, reason, now)
+	if err == nil {
+		repository.cancel()
+	}
+	return err
+}
+
+type countingMutationStorage struct {
+	Storage
+	createCalls int
+}
+
+func (storageManager *countingMutationStorage) CreateDirectory(path storage.Path) error {
+	storageManager.createCalls++
+	return storageManager.Storage.CreateDirectory(path)
 }
 
 func (*moveCompensationFailureStorage) CreateDirectory(storage.Path) error      { return nil }

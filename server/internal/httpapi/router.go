@@ -25,11 +25,12 @@ type Dependencies struct {
 }
 
 type server struct {
-	auth    *auth.Service
-	audit   *audit.Service
-	files   *files.Service
-	uploads *uploads.Service
-	logger  *slog.Logger
+	auth            *auth.Service
+	audit           *audit.Service
+	files           *files.Service
+	uploads         *uploads.Service
+	logger          *slog.Logger
+	loginAdmissions chan struct{}
 }
 
 type contextKey string
@@ -45,11 +46,12 @@ func NewHandler(dependencies Dependencies) http.Handler {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	server := &server{
-		auth:    dependencies.Auth,
-		audit:   dependencies.Audit,
-		files:   dependencies.Files,
-		uploads: dependencies.Uploads,
-		logger:  logger,
+		auth:            dependencies.Auth,
+		audit:           dependencies.Audit,
+		files:           dependencies.Files,
+		uploads:         dependencies.Uploads,
+		logger:          logger,
+		loginAdmissions: make(chan struct{}, maximumConcurrentLoginRequests),
 	}
 
 	mux := http.NewServeMux()

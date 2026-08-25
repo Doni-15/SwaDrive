@@ -99,16 +99,25 @@ func (repository *SQLiteFileIndexRepository) Search(ctx context.Context, normali
 }
 
 func (repository *SQLiteFileIndexRepository) CreateWithAudit(ctx context.Context, entry Entry, event audit.Event) error {
+	return repository.CreateWithAuditAndRepair(ctx, entry, event, "")
+}
+
+func (repository *SQLiteFileIndexRepository) CreateWithAuditAndRepair(ctx context.Context, entry Entry, event audit.Event, repairReason string) error {
 	tx, err := repository.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin indexed file creation: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := repository.InsertActiveInTransaction(ctx, tx, entry); err != nil {
+	if err := repository.insertActiveInTransaction(ctx, tx, entry, repairReason); err != nil {
 		return err
 	}
 	if _, err := repository.audit.AppendInTransaction(ctx, tx, event); err != nil {
 		return fmt.Errorf("append indexed file creation audit: %w", err)
+	}
+	if repairReason != "" {
+		if err := repository.ClearHealthReasonInTransaction(ctx, tx, repairReason, entry.IndexedAt); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit indexed file creation: %w", err)
@@ -117,12 +126,21 @@ func (repository *SQLiteFileIndexRepository) CreateWithAudit(ctx context.Context
 }
 
 func (repository *SQLiteFileIndexRepository) MoveSubtreeWithAudit(ctx context.Context, source, destination storage.Path, event audit.Event) error {
+	return repository.MoveSubtreeWithAuditAndRepair(ctx, source, destination, event, "")
+}
+
+func (repository *SQLiteFileIndexRepository) MoveSubtreeWithAuditAndRepair(ctx context.Context, source, destination storage.Path, event audit.Event, repairReason string) error {
 	tx, err := repository.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin indexed file move: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	generationID, err := repository.activeGeneration(ctx, tx)
+	var generationID int64
+	if repairReason == "" {
+		generationID, err = repository.activeGeneration(ctx, tx)
+	} else {
+		generationID, err = repository.activeGenerationForRepair(ctx, tx, repairReason)
+	}
 	if err != nil {
 		return err
 	}
@@ -190,6 +208,11 @@ func (repository *SQLiteFileIndexRepository) MoveSubtreeWithAudit(ctx context.Co
 	if _, err := repository.audit.AppendInTransaction(ctx, tx, event); err != nil {
 		return fmt.Errorf("append indexed file move audit: %w", err)
 	}
+	if repairReason != "" {
+		if err := repository.ClearHealthReasonInTransaction(ctx, tx, repairReason, event.OccurredAt); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit indexed file move: %w", err)
 	}
@@ -197,10 +220,20 @@ func (repository *SQLiteFileIndexRepository) MoveSubtreeWithAudit(ctx context.Co
 }
 
 func (repository *SQLiteFileIndexRepository) InsertActiveInTransaction(ctx context.Context, tx *sql.Tx, entry Entry) error {
+	return repository.insertActiveInTransaction(ctx, tx, entry, "")
+}
+
+func (repository *SQLiteFileIndexRepository) insertActiveInTransaction(ctx context.Context, tx *sql.Tx, entry Entry, repairReason string) error {
 	if err := validateEntry(entry); err != nil {
 		return err
 	}
-	generationID, err := repository.activeGeneration(ctx, tx)
+	var generationID int64
+	var err error
+	if repairReason == "" {
+		generationID, err = repository.activeGeneration(ctx, tx)
+	} else {
+		generationID, err = repository.activeGenerationForRepair(ctx, tx, repairReason)
+	}
 	if err != nil {
 		return err
 	}
@@ -210,6 +243,51 @@ func (repository *SQLiteFileIndexRepository) InsertActiveInTransaction(ctx conte
 	entry.GenerationID = generationID
 	if err := insertEntry(ctx, tx, entry); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (repository *SQLiteFileIndexRepository) BeginMutation(ctx context.Context, reason string, now time.Time) error {
+	if reason == "" || len(reason) > 256 {
+		return ErrIndexInconsistent
+	}
+	result, err := repository.db.ExecContext(ctx, `
+		UPDATE file_index_state
+		SET healthy = 0, unhealthy_reason = ?, updated_at = ?
+		WHERE singleton = 1 AND healthy = 1
+		  AND EXISTS (
+		      SELECT 1 FROM file_index_generations
+		      WHERE id = file_index_state.active_generation_id AND status = 'active'
+		  )
+	`, reason, now.UTC().Unix())
+	if err != nil {
+		return fmt.Errorf("begin durable file mutation: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read durable file mutation result: %w", err)
+	}
+	if rowsAffected != 1 {
+		return ErrIndexInconsistent
+	}
+	return nil
+}
+
+func (repository *SQLiteFileIndexRepository) ClearMutation(ctx context.Context, reason string, now time.Time) error {
+	result, err := repository.db.ExecContext(ctx, `
+		UPDATE file_index_state
+		SET healthy = 1, unhealthy_reason = NULL, updated_at = ?
+		WHERE singleton = 1 AND healthy = 0 AND unhealthy_reason = ?
+	`, now.UTC().Unix(), reason)
+	if err != nil {
+		return fmt.Errorf("clear durable file mutation: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read durable file mutation clear result: %w", err)
+	}
+	if rowsAffected != 1 {
+		return ErrIndexInconsistent
 	}
 	return nil
 }

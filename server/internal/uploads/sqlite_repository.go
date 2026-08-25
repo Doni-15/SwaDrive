@@ -82,6 +82,17 @@ func (repository *SQLiteRepository) Find(ctx context.Context, userID int64, id s
 	return upload, nil
 }
 
+func (repository *SQLiteRepository) IsKnownPart(ctx context.Context, partName string) (bool, error) {
+	var exists int
+	err := repository.db.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM uploads WHERE part_name = ?)
+	`, partName).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check upload part ownership: %w", err)
+	}
+	return exists == 1, nil
+}
+
 func (repository *SQLiteRepository) FindChunk(ctx context.Context, uploadID string, index int64) (Chunk, error) {
 	var chunk Chunk
 	var receivedAt int64

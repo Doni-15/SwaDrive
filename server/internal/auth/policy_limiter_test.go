@@ -42,8 +42,11 @@ func TestNewPasswordPolicyAllowsPassphrasesAndBoundsInput(t *testing.T) {
 func TestLoginLimiterBlocksClearsAndBoundsMemory(t *testing.T) {
 	limiter := NewLoginLimiter(2)
 	now := time.Unix(1_800_000_000, 0).UTC()
-	for range AccountFailureLimit {
-		limiter.RecordFailure("alice", "192.0.2.1", now)
+	for attempt := range AccountFailureLimit {
+		transitions := limiter.RecordFailure("alice", "192.0.2.1", now)
+		if transitions.includes(accountBlockTransition) != (attempt == AccountFailureLimit-1) || transitions.includes(ipBlockTransition) {
+			t.Fatalf("account transition on attempt %d = %b", attempt+1, transitions)
+		}
 	}
 	retryAfter, blocked := limiter.Check("alice", "192.0.2.1", now)
 	if !blocked || retryAfter != LoginBlockDuration {
@@ -73,7 +76,10 @@ func TestLoginLimiterBlocksUsernameSprayingPerIPWithoutBlockingPeers(t *testing.
 	limiter := NewLoginLimiter(100)
 	now := time.Unix(1_800_000_000, 0).UTC()
 	for attempt := range IPFailureLimit {
-		limiter.RecordFailure("sprayed-"+strconv.Itoa(attempt), "192.0.2.20", now)
+		transitions := limiter.RecordFailure("sprayed-"+strconv.Itoa(attempt), "192.0.2.20", now)
+		if transitions.includes(ipBlockTransition) != (attempt == IPFailureLimit-1) {
+			t.Fatalf("IP transition on attempt %d = %b", attempt+1, transitions)
+		}
 	}
 	if _, blocked := limiter.Check("unused", "192.0.2.20", now); !blocked {
 		t.Fatal("aggregate peer bucket did not block username spraying")

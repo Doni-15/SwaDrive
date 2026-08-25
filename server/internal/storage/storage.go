@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"os"
@@ -17,14 +18,21 @@ import (
 )
 
 var (
-	ErrNotFound            = errors.New("storage item not found")
-	ErrConflict            = errors.New("storage destination already exists")
-	ErrNotDirectory        = errors.New("storage item is not a directory")
-	ErrNotRegularFile      = errors.New("storage item is not a regular file")
-	ErrSymlink             = errors.New("symbolic links are not accessible")
-	ErrInsufficientSpace   = errors.New("insufficient free storage space")
-	ErrDirectoryNotEmpty   = errors.New("directory is not empty")
-	ErrDifferentFilesystem = errors.New("files, uploads, and trash must share one filesystem")
+	ErrNotFound              = errors.New("storage item not found")
+	ErrConflict              = errors.New("storage destination already exists")
+	ErrNotDirectory          = errors.New("storage item is not a directory")
+	ErrNotRegularFile        = errors.New("storage item is not a regular file")
+	ErrSymlink               = errors.New("symbolic links are not accessible")
+	ErrInsufficientSpace     = errors.New("insufficient free storage space")
+	ErrDirectoryNotEmpty     = errors.New("directory is not empty")
+	ErrDifferentFilesystem   = errors.New("files, uploads, and trash must share one filesystem")
+	ErrStorageVolumeRequired = errors.New("storage volume ID is required")
+	ErrStorageVolumeMismatch = errors.New("storage volume identity does not match")
+)
+
+const (
+	storageVolumeMarkerName   = ".swadrive-volume"
+	maximumStorageVolumeIDLen = 128
 )
 
 type Entry struct {
@@ -33,6 +41,13 @@ type Entry struct {
 	IsDir      bool
 	Size       int64
 	ModifiedAt time.Time
+}
+
+type PublicationState struct {
+	PartExists            bool
+	DestinationExists     bool
+	DestinationSize       int64
+	DestinationModifiedAt time.Time
 }
 
 // ReindexEntry is emitted only by explicit administrative traversal. Normal
@@ -44,6 +59,14 @@ type ReindexEntry struct {
 	ModifiedAt   time.Time
 }
 
+// UploadPartEntry is emitted only during explicit local-admin reconciliation.
+// It contains an internal name and metadata, never user bytes or a host path.
+type UploadPartEntry struct {
+	Name       string
+	Size       int64
+	ModifiedAt time.Time
+}
+
 type Manager struct {
 	root       *os.Root
 	files      *os.Root
@@ -53,6 +76,16 @@ type Manager struct {
 }
 
 func Open(rootPath string) (*Manager, error) {
+	return open(rootPath, "", false)
+}
+
+// OpenVerified verifies the expected SwaDrive volume before creating or
+// opening the content directories.
+func OpenVerified(rootPath, expectedVolumeID string) (*Manager, error) {
+	return open(rootPath, expectedVolumeID, true)
+}
+
+func open(rootPath, expectedVolumeID string, verifyVolume bool) (*Manager, error) {
 	if strings.TrimSpace(rootPath) == "" {
 		return nil, errors.New("storage root path is required")
 	}
@@ -61,6 +94,14 @@ func Open(rootPath string) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open storage root: %w", err)
 	}
+
+	if verifyVolume {
+		if err := verifyStorageVolume(root, expectedVolumeID); err != nil {
+			_ = root.Close()
+			return nil, err
+		}
+	}
+
 	manager := &Manager{root: root}
 	closeOnError := func(openErr error) (*Manager, error) {
 		_ = manager.Close()
@@ -72,6 +113,7 @@ func Open(rootPath string) (*Manager, error) {
 			return closeOnError(err)
 		}
 	}
+
 	if manager.files, err = root.OpenRoot("files"); err != nil {
 		return closeOnError(fmt.Errorf("open files root: %w", err))
 	}
@@ -81,10 +123,72 @@ func Open(rootPath string) (*Manager, error) {
 	if manager.trash, err = root.OpenRoot("trash"); err != nil {
 		return closeOnError(fmt.Errorf("open trash root: %w", err))
 	}
+
 	if err := ensureSameFilesystem(manager.files, manager.uploads, manager.trash); err != nil {
 		return closeOnError(err)
 	}
+
 	return manager, nil
+}
+
+func verifyStorageVolume(root *os.Root, expectedVolumeID string) error {
+	expectedVolumeID = strings.TrimSpace(expectedVolumeID)
+	if !validStorageVolumeID(expectedVolumeID) {
+		return ErrStorageVolumeRequired
+	}
+
+	info, err := root.Lstat(storageVolumeMarkerName)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return ErrStorageVolumeMismatch
+		}
+		return fmt.Errorf("inspect storage volume marker: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return ErrStorageVolumeMismatch
+	}
+
+	file, err := root.Open(storageVolumeMarkerName)
+	if err != nil {
+		return fmt.Errorf("open storage volume marker: %w", err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maximumStorageVolumeIDLen+3))
+	if err != nil {
+		return fmt.Errorf("read storage volume marker: %w", err)
+	}
+	if len(data) > maximumStorageVolumeIDLen+2 {
+		return ErrStorageVolumeMismatch
+	}
+
+	actualVolumeID := string(data)
+	actualVolumeID = strings.TrimSuffix(actualVolumeID, "\n")
+	actualVolumeID = strings.TrimSuffix(actualVolumeID, "\r")
+
+	if !validStorageVolumeID(actualVolumeID) || actualVolumeID != expectedVolumeID {
+		return ErrStorageVolumeMismatch
+	}
+	return nil
+}
+
+func validStorageVolumeID(value string) bool {
+	if len(value) == 0 || len(value) > maximumStorageVolumeIDLen {
+		return false
+	}
+
+	for _, character := range value {
+		switch {
+		case character >= 'a' && character <= 'z':
+		case character >= 'A' && character <= 'Z':
+		case character >= '0' && character <= '9':
+		case character == '-', character == '_', character == '.':
+		default:
+			return false
+		}
+	}
+
+	return true
 }
 
 func (manager *Manager) Close() error {
@@ -113,6 +217,50 @@ func (manager *Manager) WalkTrashForReindex(ctx context.Context, trashName strin
 		}
 		return strings.TrimPrefix(name, trashName+"/")
 	}, visit)
+}
+
+// WalkUploadPartsForReconciliation scans only the internal uploads directory in
+// bounded directory batches. Normal server startup and metadata APIs never call
+// it; orphan cleanup is an explicit offline administrator operation.
+func (manager *Manager) WalkUploadPartsForReconciliation(ctx context.Context, visit func(UploadPartEntry) error) error {
+	if visit == nil {
+		return errors.New("upload part visitor is required")
+	}
+	directory, err := manager.uploads.Open(".")
+	if err != nil {
+		return mapFilesystemError(err)
+	}
+	defer directory.Close()
+
+	const directoryBatchSize = 100
+	for {
+		entries, readErr := directory.ReadDir(directoryBatchSize)
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			name := entry.Name()
+			if !validInternalName(name) || entry.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+			info, infoErr := manager.uploads.Lstat(name)
+			if infoErr != nil {
+				return mapFilesystemError(infoErr)
+			}
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			if err := visit(UploadPartEntry{Name: name, Size: info.Size(), ModifiedAt: info.ModTime().UTC()}); err != nil {
+				return err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return mapFilesystemError(readErr)
+		}
+	}
 }
 
 func walkRootForReindex(ctx context.Context, root *os.Root, start string, relative func(string) string, visit func(ReindexEntry) error) error {
@@ -372,21 +520,49 @@ func (manager *Manager) FinalizePart(partName string, destination Path) error {
 	return nil
 }
 
-func (manager *Manager) FinalizationState(partName string, destination Path) (partExists, destinationExists bool, err error) {
+func (manager *Manager) FinalizationState(partName string, destination Path) (PublicationState, error) {
+	if !validInternalName(partName) || destination.value == "" {
+		return PublicationState{}, ErrInvalidPath
+	}
+
 	manager.mutationMu.Lock()
 	defer manager.mutationMu.Unlock()
 
-	if _, statErr := manager.uploads.Lstat(partName); statErr == nil {
-		partExists = true
-	} else if !errors.Is(statErr, fs.ErrNotExist) {
-		return false, false, mapFilesystemError(statErr)
+	var state PublicationState
+
+	partInfo, statErr := manager.uploads.Lstat(partName)
+	switch {
+	case statErr == nil:
+		if partInfo.Mode()&os.ModeSymlink != 0 {
+			return PublicationState{}, ErrSymlink
+		}
+		if !partInfo.Mode().IsRegular() {
+			return PublicationState{}, ErrNotRegularFile
+		}
+		state.PartExists = true
+	case errors.Is(statErr, fs.ErrNotExist):
+	default:
+		return PublicationState{}, mapFilesystemError(statErr)
 	}
-	if _, statErr := manager.files.Lstat(destination.rootName()); statErr == nil {
-		destinationExists = true
-	} else if !errors.Is(statErr, fs.ErrNotExist) {
-		return false, false, mapFilesystemError(statErr)
+
+	destinationInfo, statErr := manager.files.Lstat(destination.rootName())
+	switch {
+	case statErr == nil:
+		if destinationInfo.Mode()&os.ModeSymlink != 0 {
+			return PublicationState{}, ErrSymlink
+		}
+		if !destinationInfo.Mode().IsRegular() {
+			return PublicationState{}, ErrNotRegularFile
+		}
+		state.DestinationExists = true
+		state.DestinationSize = destinationInfo.Size()
+		state.DestinationModifiedAt = destinationInfo.ModTime().UTC()
+	case errors.Is(statErr, fs.ErrNotExist):
+	default:
+		return PublicationState{}, mapFilesystemError(statErr)
 	}
-	return partExists, destinationExists, nil
+
+	return state, nil
 }
 
 func (manager *Manager) CheckAvailable(required, reserve uint64) error {

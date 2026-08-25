@@ -127,6 +127,62 @@ func TestGenerationSwitchInterruptedBuildAndObsoleteCleanup(t *testing.T) {
 	}
 }
 
+func TestDurableMutationIntentFailsClosedUntilCompletedOrReindexed(t *testing.T) {
+	db, repository, now := openIndexTestRepository(t)
+	ctx := context.Background()
+
+	if err := repository.BeginMutation(ctx, mkdirMutationReason, now); err != nil {
+		t.Fatalf("BeginMutation() error = %v", err)
+	}
+	if err := repository.CheckHealthy(ctx); !errors.Is(err, ErrIndexInconsistent) {
+		t.Fatalf("CheckHealthy(pending mutation) error = %v; want ErrIndexInconsistent", err)
+	}
+	if err := repository.ClearMutation(ctx, mkdirMutationReason, now.Add(time.Second)); err != nil {
+		t.Fatalf("ClearMutation() error = %v", err)
+	}
+	if err := repository.CheckHealthy(ctx); err != nil {
+		t.Fatalf("CheckHealthy(cleared mutation) error = %v", err)
+	}
+
+	if err := repository.BeginMutation(ctx, mkdirMutationReason, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("BeginMutation(second) error = %v", err)
+	}
+	logicalPath, _ := storage.ParsePath("durable-intent", false)
+	entry, _ := NewEntry(logicalPath, KindDirectory, 0, now, now.Add(2*time.Second), "", nil)
+	if err := repository.CreateWithAuditAndRepair(ctx, entry, testAuditEvent("test.durable_create"), mkdirMutationReason); err != nil {
+		t.Fatalf("CreateWithAuditAndRepair() error = %v", err)
+	}
+	if err := repository.CheckHealthy(ctx); err != nil {
+		t.Fatalf("CheckHealthy(completed mutation) error = %v", err)
+	}
+
+	if err := repository.BeginMutation(ctx, moveMutationReason, now.Add(3*time.Second)); err != nil {
+		t.Fatalf("BeginMutation(crash simulation) error = %v", err)
+	}
+	building, err := repository.StartGeneration(ctx, now.Add(4*time.Second))
+	if err != nil {
+		t.Fatalf("StartGeneration() error = %v", err)
+	}
+	if err := repository.InsertGenerationBatch(ctx, building.ID, []Entry{entry}); err != nil {
+		t.Fatalf("InsertGenerationBatch() error = %v", err)
+	}
+	if err := repository.ActivateGeneration(ctx, building.ID, 1, now.Add(5*time.Second)); err != nil {
+		t.Fatalf("ActivateGeneration() error = %v", err)
+	}
+	if err := repository.CheckHealthy(ctx); err != nil {
+		t.Fatalf("CheckHealthy(after explicit reindex) error = %v", err)
+	}
+
+	var healthy int
+	var reason sql.NullString
+	if err := db.QueryRow(`SELECT healthy, unhealthy_reason FROM file_index_state WHERE singleton = 1`).Scan(&healthy, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if healthy != 1 || reason.Valid {
+		t.Fatalf("index state = healthy %d reason %q; want healthy", healthy, reason.String)
+	}
+}
+
 func TestSQLiteSupportsFTS5ButFileIndexUsesOrdinaryTables(t *testing.T) {
 	db, _, _ := openIndexTestRepository(t)
 	var enabled, ftsTables int

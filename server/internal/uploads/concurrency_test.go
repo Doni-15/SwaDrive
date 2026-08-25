@@ -277,32 +277,75 @@ func TestCompletionAuditFailureLeavesRecoverableFinalizingState(t *testing.T) {
 	environment := newUploadTestEnvironment(t, 2)
 	content := []byte("recover finalization")
 	upload := environment.create(t, "recovery.bin", int64(len(content)))
+
 	checksum := sha256.Sum256(content)
-	if _, err := environment.service.PutChunk(context.Background(), environment.identity, upload.ID, 0, bytes.NewReader(content), checksum[:]); err != nil {
+	if _, err := environment.service.PutChunk(
+		context.Background(),
+		environment.identity,
+		upload.ID,
+		0,
+		bytes.NewReader(content),
+		checksum[:],
+	); err != nil {
 		t.Fatalf("PutChunk() error = %v", err)
 	}
+
 	var indexed int
-	if err := environment.db.QueryRow(`SELECT COUNT(*) FROM file_entries WHERE logical_path = ? AND trash_entry_id IS NULL`, upload.TargetPath).Scan(&indexed); err != nil || indexed != 0 {
+	if err := environment.db.QueryRow(
+		`SELECT COUNT(*) FROM file_entries WHERE logical_path = ? AND trash_entry_id IS NULL`,
+		upload.TargetPath,
+	).Scan(&indexed); err != nil || indexed != 0 {
 		t.Fatalf("index before publication = %d, %v; want 0", indexed, err)
 	}
+
 	installUploadAuditFailureTrigger(t, environment.db)
 	if _, err := environment.service.Complete(context.Background(), environment.identity, upload.ID); err == nil {
 		t.Fatal("Complete() succeeded with forced audit failure")
 	}
+
 	var status string
-	if err := environment.db.QueryRow(`SELECT status FROM uploads WHERE id = ?`, upload.ID).Scan(&status); err != nil || status != string(StatusFinalizing) {
+	if err := environment.db.QueryRow(
+		`SELECT status FROM uploads WHERE id = ?`,
+		upload.ID,
+	).Scan(&status); err != nil || status != string(StatusFinalizing) {
 		t.Fatalf("interrupted completion status = %q, %v; want finalizing", status, err)
 	}
-	if contents, err := os.ReadFile(filepath.Join(environment.root, "files", "recovery.bin")); err != nil || !bytes.Equal(contents, content) {
+
+	recoveryPath := filepath.Join(environment.root, "files", "recovery.bin")
+	if contents, err := os.ReadFile(recoveryPath); err != nil || !bytes.Equal(contents, content) {
 		t.Fatalf("recovery destination = %q, %v", contents, err)
 	}
+
+	physicalModifiedAt := time.Unix(1_700_000_123, 0).UTC()
+	if err := os.Chtimes(recoveryPath, physicalModifiedAt, physicalModifiedAt); err != nil {
+		t.Fatalf("set recovery destination mtime: %v", err)
+	}
+
 	dropUploadAuditFailureTrigger(t, environment.db)
+
 	completed, err := environment.service.Complete(context.Background(), environment.identity, upload.ID)
 	if err != nil || completed.Status != StatusCompleted {
 		t.Fatalf("Complete(recovery) = %s, %v; want completed", completed.Status, err)
 	}
-	if err := environment.db.QueryRow(`SELECT COUNT(*) FROM file_entries WHERE logical_path = ? AND trash_entry_id IS NULL`, upload.TargetPath).Scan(&indexed); err != nil || indexed != 1 {
-		t.Fatalf("index after publication recovery = %d, %v; want 1", indexed, err)
+
+	var indexedModifiedAt int64
+	if err := environment.db.QueryRow(
+		`SELECT COUNT(*), COALESCE(MAX(modified_at), 0)
+		 FROM file_entries
+		 WHERE logical_path = ? AND trash_entry_id IS NULL`,
+		upload.TargetPath,
+	).Scan(&indexed, &indexedModifiedAt); err != nil {
+		t.Fatal(err)
+	}
+	if indexed != 1 {
+		t.Fatalf("index after publication recovery = %d; want 1", indexed)
+	}
+	if indexedModifiedAt != physicalModifiedAt.Unix() {
+		t.Fatalf(
+			"recovered indexed mtime = %d; want physical mtime %d",
+			indexedModifiedAt,
+			physicalModifiedAt.Unix(),
+		)
 	}
 }
 
@@ -310,40 +353,127 @@ func TestStartupFinalizingReconciliationStateMatrix(t *testing.T) {
 	t.Run("part exists destination absent resets pending", func(t *testing.T) {
 		environment := newUploadTestEnvironment(t, 1)
 		upload := environment.create(t, "reset.bin", 0)
-		if err := environment.service.repository.TransitionStatus(context.Background(), upload.UserID, upload.ID, StatusPending, StatusFinalizing, upload.UpdatedAt); err != nil {
+
+		if err := environment.service.repository.TransitionStatus(
+			context.Background(),
+			upload.UserID,
+			upload.ID,
+			StatusPending,
+			StatusFinalizing,
+			upload.UpdatedAt,
+		); err != nil {
 			t.Fatal(err)
 		}
+
 		count, err := environment.service.ReconcileFinalizing(context.Background())
 		if err != nil || count != 1 {
 			t.Fatalf("ReconcileFinalizing() = %d, %v", count, err)
 		}
+
 		reset, err := environment.service.repository.Find(context.Background(), upload.UserID, upload.ID)
 		if err != nil || reset.Status != StatusPending {
 			t.Fatalf("reset status = %s, %v; want pending", reset.Status, err)
 		}
 	})
 
-	t.Run("published destination completes and indexes", func(t *testing.T) {
+	t.Run("published destination completes with physical metadata", func(t *testing.T) {
 		environment := newUploadTestEnvironment(t, 1)
 		upload := environment.create(t, "published.bin", 0)
-		if err := environment.service.repository.TransitionStatus(context.Background(), upload.UserID, upload.ID, StatusPending, StatusFinalizing, upload.UpdatedAt); err != nil {
+
+		if err := environment.service.repository.TransitionStatus(
+			context.Background(),
+			upload.UserID,
+			upload.ID,
+			StatusPending,
+			StatusFinalizing,
+			upload.UpdatedAt,
+		); err != nil {
 			t.Fatal(err)
 		}
+
 		destination, _ := storage.ParsePath(upload.TargetPath, false)
 		if err := environment.manager.FinalizePart(upload.PartName, destination); err != nil {
 			t.Fatal(err)
 		}
+
+		physicalModifiedAt := time.Unix(1_700_000_456, 0).UTC()
+		destinationPath := filepath.Join(environment.root, "files", upload.TargetPath)
+		if err := os.Chtimes(destinationPath, physicalModifiedAt, physicalModifiedAt); err != nil {
+			t.Fatalf("set published destination mtime: %v", err)
+		}
+
 		count, err := environment.service.ReconcileFinalizing(context.Background())
 		if err != nil || count != 1 {
 			t.Fatalf("ReconcileFinalizing() = %d, %v", count, err)
 		}
+
 		completed, err := environment.service.repository.Find(context.Background(), upload.UserID, upload.ID)
 		if err != nil || completed.Status != StatusCompleted {
 			t.Fatalf("published status = %s, %v; want completed", completed.Status, err)
 		}
+
 		var indexed int
-		if err := environment.db.QueryRow(`SELECT COUNT(*) FROM file_entries WHERE logical_path = 'published.bin' AND trash_entry_id IS NULL`).Scan(&indexed); err != nil || indexed != 1 {
-			t.Fatalf("published index count = %d, %v; want 1", indexed, err)
+		var indexedModifiedAt int64
+		if err := environment.db.QueryRow(
+			`SELECT COUNT(*), COALESCE(MAX(modified_at), 0)
+			 FROM file_entries
+			 WHERE logical_path = 'published.bin' AND trash_entry_id IS NULL`,
+		).Scan(&indexed, &indexedModifiedAt); err != nil {
+			t.Fatal(err)
+		}
+		if indexed != 1 {
+			t.Fatalf("published index count = %d; want 1", indexed)
+		}
+		if indexedModifiedAt != physicalModifiedAt.Unix() {
+			t.Fatalf(
+				"published indexed mtime = %d; want physical mtime %d",
+				indexedModifiedAt,
+				physicalModifiedAt.Unix(),
+			)
+		}
+	})
+
+	t.Run("published destination with wrong size fails closed", func(t *testing.T) {
+		environment := newUploadTestEnvironment(t, 1)
+		upload := environment.create(t, "wrong-size.bin", 8)
+
+		if err := environment.service.repository.TransitionStatus(
+			context.Background(),
+			upload.UserID,
+			upload.ID,
+			StatusPending,
+			StatusFinalizing,
+			upload.UpdatedAt,
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := environment.manager.RemovePart(upload.PartName); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(environment.root, "files", upload.TargetPath),
+			[]byte("x"),
+			0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := environment.service.ReconcileFinalizing(context.Background()); !errors.Is(err, ErrFinalizationReconciliation) {
+			t.Fatalf(
+				"ReconcileFinalizing() error = %v; want ErrFinalizationReconciliation",
+				err,
+			)
+		}
+
+		var healthy int
+		if err := environment.db.QueryRow(
+			`SELECT healthy FROM file_index_state WHERE singleton = 1`,
+		).Scan(&healthy); err != nil {
+			t.Fatal(err)
+		}
+		if healthy != 0 {
+			t.Fatalf("file index healthy = %d; want 0 after published-size mismatch", healthy)
 		}
 	})
 
@@ -358,21 +488,38 @@ func TestStartupFinalizingReconciliationStateMatrix(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			environment := newUploadTestEnvironment(t, 1)
 			upload := environment.create(t, "ambiguous.bin", 0)
-			if err := environment.service.repository.TransitionStatus(context.Background(), upload.UserID, upload.ID, StatusPending, StatusFinalizing, upload.UpdatedAt); err != nil {
+
+			if err := environment.service.repository.TransitionStatus(
+				context.Background(),
+				upload.UserID,
+				upload.ID,
+				StatusPending,
+				StatusFinalizing,
+				upload.UpdatedAt,
+			); err != nil {
 				t.Fatal(err)
 			}
+
 			if !test.partExists {
 				if err := environment.manager.RemovePart(upload.PartName); err != nil {
 					t.Fatal(err)
 				}
 			}
 			if test.destination {
-				if err := os.WriteFile(filepath.Join(environment.root, "files", upload.TargetPath), nil, 0o600); err != nil {
+				if err := os.WriteFile(
+					filepath.Join(environment.root, "files", upload.TargetPath),
+					nil,
+					0o600,
+				); err != nil {
 					t.Fatal(err)
 				}
 			}
+
 			if _, err := environment.service.ReconcileFinalizing(context.Background()); !errors.Is(err, ErrFinalizationReconciliation) {
-				t.Fatalf("ReconcileFinalizing() error = %v; want ErrFinalizationReconciliation", err)
+				t.Fatalf(
+					"ReconcileFinalizing() error = %v; want ErrFinalizationReconciliation",
+					err,
+				)
 			}
 		})
 	}
@@ -404,6 +551,40 @@ func TestUploadStatusDoesNotTouchStorageAndCancelledUploadIsNeverIndexed(t *test
 	}
 	if guard.calls != 0 {
 		t.Fatalf("upload status touched storage %d times", guard.calls)
+	}
+}
+
+func TestRestartCleanupRepairsExpiredPendingUploadWithMissingPart(t *testing.T) {
+	environment := newUploadTestEnvironment(t, 1)
+	upload := environment.create(t, "missing-part-after-restart.bin", 0)
+	if err := environment.manager.RemovePart(upload.PartName); err != nil {
+		t.Fatalf("RemovePart(crash fixture) error = %v", err)
+	}
+	*environment.now = environment.now.Add(UploadLifetime + time.Second)
+
+	// Constructing a fresh service models restart: cleanup must treat an already
+	// missing internal part as removed, then durably expire the known DB row.
+	auditService := audit.NewService(audit.NewSQLiteRepository(environment.db), func() time.Time { return *environment.now })
+	restarted := NewService(
+		NewSQLiteRepository(environment.db),
+		environment.manager,
+		storage.NewMutationCoordinator(),
+		auditService,
+		0,
+		1,
+		func() time.Time { return *environment.now },
+	)
+	cleaned, err := restarted.CleanupExpired(context.Background())
+	if err != nil || cleaned != 1 {
+		t.Fatalf("CleanupExpired(restarted missing part) = %d, %v; want 1", cleaned, err)
+	}
+	stored, err := restarted.Get(context.Background(), environment.identity, upload.ID)
+	if err != nil || stored.Status != StatusExpired {
+		t.Fatalf("Get(repaired upload) = %s, %v; want expired", stored.Status, err)
+	}
+	var indexed int
+	if err := environment.db.QueryRow(`SELECT COUNT(*) FROM file_entries WHERE logical_path = ?`, upload.TargetPath).Scan(&indexed); err != nil || indexed != 0 {
+		t.Fatalf("missing-part expired upload index rows = %d, %v; want 0", indexed, err)
 	}
 }
 
@@ -482,8 +663,8 @@ func (guard *failOnUploadStorage) OpenPart(string) (*os.File, error)       { ret
 func (guard *failOnUploadStorage) RemovePart(string) error                 { return guard.called() }
 func (guard *failOnUploadStorage) PartInfo(string) (os.FileInfo, error)    { return nil, guard.called() }
 func (guard *failOnUploadStorage) FinalizePart(string, storage.Path) error { return guard.called() }
-func (guard *failOnUploadStorage) FinalizationState(string, storage.Path) (bool, bool, error) {
-	return false, false, guard.called()
+func (guard *failOnUploadStorage) FinalizationState(string, storage.Path) (storage.PublicationState, error) {
+	return storage.PublicationState{}, guard.called()
 }
 func (guard *failOnUploadStorage) CheckAvailable(uint64, uint64) error { return guard.called() }
 

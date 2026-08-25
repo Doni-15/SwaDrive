@@ -32,7 +32,7 @@ type Storage interface {
 	RemovePart(name string) error
 	PartInfo(name string) (os.FileInfo, error)
 	FinalizePart(partName string, destination storage.Path) error
-	FinalizationState(partName string, destination storage.Path) (partExists, destinationExists bool, err error)
+	FinalizationState(partName string, destination storage.Path) (storage.PublicationState, error)
 	CheckAvailable(required, reserve uint64) error
 }
 
@@ -299,18 +299,21 @@ func (service *Service) Complete(ctx context.Context, identity auth.Identity, id
 	}
 
 	if upload.Status == StatusFinalizing {
-		partExists, destinationExists, err := service.storage.FinalizationState(upload.PartName, destination)
+		state, err := service.storage.FinalizationState(upload.PartName, destination)
 		if err != nil {
 			return Upload{}, err
 		}
-		if !partExists && destinationExists {
+		if !state.PartExists && state.DestinationExists {
 			now := service.now().UTC()
-			if err := service.completePublished(ctx, upload, identity, now, now); err != nil {
+			if err := service.validatePublishedState(ctx, upload, state, now); err != nil {
+				return Upload{}, err
+			}
+			if err := service.completePublished(ctx, upload, identity, state.DestinationModifiedAt, now, nil); err != nil {
 				return Upload{}, err
 			}
 			return service.repository.Find(ctx, upload.UserID, upload.ID)
 		}
-		if !partExists || destinationExists {
+		if !state.PartExists || state.DestinationExists {
 			return Upload{}, ErrUploadState
 		}
 	}
@@ -343,7 +346,7 @@ func (service *Service) Complete(ctx context.Context, identity auth.Identity, id
 		}
 		return Upload{}, err
 	}
-	if err := service.completePublished(ctx, upload, identity, partInfo.ModTime().UTC(), now); err != nil {
+	if err := service.completePublished(ctx, upload, identity, partInfo.ModTime().UTC(), now, nil); err != nil {
 		return Upload{}, err
 	}
 	return service.repository.Find(ctx, upload.UserID, upload.ID)
@@ -415,7 +418,26 @@ func (service *Service) CleanupExpired(ctx context.Context) (int, error) {
 	return cleaned, nil
 }
 
-func (service *Service) completePublished(ctx context.Context, upload Upload, identity auth.Identity, modifiedAt, now time.Time) error {
+func (service *Service) validatePublishedState(ctx context.Context, upload Upload, state storage.PublicationState, now time.Time) error {
+	if !state.DestinationExists || state.DestinationSize != upload.TotalSize {
+		markErr := service.repository.MarkIndexUnhealthy(ctx, uploadHealthReason(upload.ID), now)
+		return errors.Join(
+			files.ErrIndexInconsistent,
+			fmt.Errorf("%w: published destination size does not match upload metadata", ErrFinalizationReconciliation),
+			markErr,
+		)
+	}
+	return nil
+}
+
+func (service *Service) completePublished(
+	ctx context.Context,
+	upload Upload,
+	identity auth.Identity,
+	modifiedAt time.Time,
+	now time.Time,
+	metadata map[string]string,
+) error {
 	destination, err := storage.ParsePath(upload.TargetPath, false)
 	if err != nil {
 		return err
@@ -424,7 +446,7 @@ func (service *Service) completePublished(ctx context.Context, upload Upload, id
 	if err != nil {
 		return err
 	}
-	event := service.event(identity, upload.ID, upload.TargetPath, audit.EventUploadCompleted, audit.OutcomeSuccess, nil)
+	event := service.event(identity, upload.ID, upload.TargetPath, audit.EventUploadCompleted, audit.OutcomeSuccess, metadata)
 	if err := service.repository.CompleteWithAudit(ctx, upload.UserID, upload.ID, now, entry, event); err != nil {
 		markErr := service.repository.MarkIndexUnhealthy(ctx, uploadHealthReason(upload.ID), now)
 		return errors.Join(err, markErr)
@@ -471,6 +493,7 @@ func (service *Service) ReconcileFinalizing(ctx context.Context) (int, error) {
 func (service *Service) reconcileFinalizingUpload(ctx context.Context, candidate Upload) error {
 	unlockMutation := service.mutations.Lock()
 	defer unlockMutation()
+
 	upload, err := service.repository.Find(ctx, candidate.UserID, candidate.ID)
 	if errors.Is(err, ErrUploadNotFound) || err == nil && upload.Status != StatusFinalizing {
 		return nil
@@ -478,34 +501,50 @@ func (service *Service) reconcileFinalizingUpload(ctx context.Context, candidate
 	if err != nil {
 		return err
 	}
+
 	destination, err := storage.ParsePath(upload.TargetPath, false)
 	if err != nil {
 		return errors.Join(ErrFinalizationReconciliation, err)
 	}
-	partExists, destinationExists, err := service.storage.FinalizationState(upload.PartName, destination)
+
+	state, err := service.storage.FinalizationState(upload.PartName, destination)
 	if err != nil {
 		return err
 	}
+
 	now := service.now().UTC()
 	switch {
-	case partExists && !destinationExists:
+	case state.PartExists && !state.DestinationExists:
 		return service.repository.ResetFinalizing(ctx, upload.UserID, upload.ID, now)
-	case !partExists && destinationExists:
+
+	case !state.PartExists && state.DestinationExists:
+		if err := service.validatePublishedState(ctx, upload, state, now); err != nil {
+			return err
+		}
+
 		actorUserID := upload.UserID
-		identity := auth.Identity{User: auth.User{ID: actorUserID, Role: auth.RoleOwner}}
-		entry, entryErr := files.NewEntry(destination, files.KindFile, upload.TotalSize, upload.UpdatedAt, now, "", upload.WholeSHA256)
-		if entryErr != nil {
-			return entryErr
+		identity := auth.Identity{
+			User: auth.User{
+				ID:   actorUserID,
+				Role: auth.RoleOwner,
+			},
 		}
-		event := service.event(identity, upload.ID, upload.TargetPath, audit.EventUploadCompleted, audit.OutcomeSuccess, map[string]string{"reason_code": "reconciled"})
-		if err := service.repository.CompleteWithAudit(ctx, upload.UserID, upload.ID, now, entry, event); err != nil {
-			markErr := service.repository.MarkIndexUnhealthy(ctx, uploadHealthReason(upload.ID), now)
-			return errors.Join(err, markErr)
-		}
-		return nil
+
+		return service.completePublished(
+			ctx,
+			upload,
+			identity,
+			state.DestinationModifiedAt,
+			now,
+			map[string]string{"reason_code": "reconciled"},
+		)
+
 	default:
 		markErr := service.repository.MarkIndexUnhealthy(ctx, uploadHealthReason(upload.ID), now)
-		return errors.Join(fmt.Errorf("%w: upload %s has ambiguous filesystem state", ErrFinalizationReconciliation, upload.ID), markErr)
+		return errors.Join(
+			fmt.Errorf("%w: upload %s has ambiguous filesystem state", ErrFinalizationReconciliation, upload.ID),
+			markErr,
+		)
 	}
 }
 

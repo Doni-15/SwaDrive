@@ -1,10 +1,16 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/Doni-15/SwaDrive/server/internal/auth"
+)
+
+const (
+	maximumConcurrentLoginRequests = 64
+	loginBodyReadTimeout           = 15 * time.Second
 )
 
 type userResponse struct {
@@ -24,6 +30,25 @@ type sessionResponse struct {
 }
 
 func (server *server) login(w http.ResponseWriter, request *http.Request) {
+	controller := http.NewResponseController(w)
+	if err := controller.SetReadDeadline(time.Now().Add(loginBodyReadTimeout)); err == nil {
+		defer func() { _ = controller.SetReadDeadline(time.Time{}) }()
+	} else if !errors.Is(err, http.ErrNotSupported) {
+		server.logger.ErrorContext(request.Context(), "login read deadline unavailable", "request_id", requestID(request), "error_type", "read_deadline")
+		w.Header().Set("Retry-After", "1")
+		writeError(w, request, http.StatusServiceUnavailable, "server_busy", "The server could not accept another login request.")
+		return
+	}
+
+	select {
+	case server.loginAdmissions <- struct{}{}:
+		defer func() { <-server.loginAdmissions }()
+	default:
+		w.Header().Set("Retry-After", "1")
+		writeError(w, request, http.StatusServiceUnavailable, "server_busy", "The server is at its current resource limit. Try again shortly.")
+		return
+	}
+
 	var body struct {
 		Username   string `json:"username"`
 		Password   string `json:"password"`

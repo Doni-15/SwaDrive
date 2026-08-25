@@ -217,7 +217,7 @@ func encodeMetadata(metadata map[string]string) ([]byte, error) {
 
 func allowedReasonCode(value string) bool {
 	switch value {
-	case "chunk_checksum", "chunk_length", "chunk_retry_conflict", "expired", "part_size", "reconciled", "whole_file_integrity":
+	case "account_rate_limit", "chunk_checksum", "chunk_length", "chunk_retry_conflict", "expired", "ip_rate_limit", "part_size", "reconciled", "whole_file_integrity":
 		return true
 	default:
 		return false

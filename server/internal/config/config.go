@@ -21,6 +21,7 @@ const (
 type Server struct {
 	DatabasePath           string
 	StorageRoot            string
+	StorageVolumeID        string
 	ListenAddress          string
 	StorageReserveBytes    uint64
 	UploadCleanupInterval  time.Duration
@@ -33,6 +34,7 @@ func LoadServer(getenv func(string) string) (Server, error) {
 	configuration := Server{
 		DatabasePath:           strings.TrimSpace(getenv("SWADRIVE_DATABASE_PATH")),
 		StorageRoot:            strings.TrimSpace(getenv("SWADRIVE_STORAGE_ROOT")),
+		StorageVolumeID:        strings.TrimSpace(getenv("SWADRIVE_STORAGE_VOLUME_ID")),
 		ListenAddress:          strings.TrimSpace(getenv("SWADRIVE_LISTEN_ADDRESS")),
 		StorageReserveBytes:    uploads.DefaultReserveBytes,
 		UploadCleanupInterval:  defaultCleanupInterval,
@@ -40,8 +42,12 @@ func LoadServer(getenv func(string) string) (Server, error) {
 		MaxConcurrentChunks:    uploads.DefaultConcurrentChunks,
 		MaxConcurrentDownloads: files.DefaultConcurrentDownloads,
 	}
-	if configuration.DatabasePath == "" || configuration.StorageRoot == "" {
-		return Server{}, errors.New("SWADRIVE_DATABASE_PATH and SWADRIVE_STORAGE_ROOT are required")
+	if configuration.DatabasePath == "" ||
+		configuration.StorageRoot == "" ||
+		configuration.StorageVolumeID == "" {
+		return Server{}, errors.New(
+			"SWADRIVE_DATABASE_PATH, SWADRIVE_STORAGE_ROOT, and SWADRIVE_STORAGE_VOLUME_ID are required",
+		)
 	}
 	if configuration.ListenAddress == "" {
 		configuration.ListenAddress = defaultListenAddress

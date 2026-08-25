@@ -120,15 +120,6 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (LoginResul
 	}
 	now := service.now().UTC()
 	if retryAfter, blocked := service.limiter.Check(limiterUsername, input.RemoteIP, now); blocked {
-		if err := service.audit.Record(ctx, audit.Event{
-			OccurredAt: now,
-			Type:       audit.EventLoginRateLimited,
-			Outcome:    audit.OutcomeDenied,
-			RequestID:  input.RequestID,
-			RemoteIP:   input.RemoteIP,
-		}); err != nil {
-			return LoginResult{}, fmt.Errorf("record login rate-limit event: %w", err)
-		}
 		return LoginResult{}, &RateLimitError{RetryAfter: retryAfter}
 	}
 
@@ -185,7 +176,7 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (LoginResul
 }
 
 func (service *Service) failLogin(ctx context.Context, limiterUsername string, input LoginInput, now time.Time) (LoginResult, error) {
-	service.limiter.RecordFailure(limiterUsername, input.RemoteIP, now)
+	transitions := service.limiter.RecordFailure(limiterUsername, input.RemoteIP, now)
 	if err := service.audit.Record(ctx, audit.Event{
 		OccurredAt: now,
 		Type:       audit.EventLoginFailure,
@@ -195,7 +186,38 @@ func (service *Service) failLogin(ctx context.Context, limiterUsername string, i
 	}); err != nil {
 		return LoginResult{}, fmt.Errorf("record login failure event: %w", err)
 	}
+	if err := service.recordLoginBlockTransitions(ctx, transitions, input, now); err != nil {
+		return LoginResult{}, err
+	}
 	return LoginResult{}, ErrInvalidCredentials
+}
+
+// A block is audited only when a limiter bucket crosses its threshold. Requests
+// rejected by an already-blocked bucket do not write durable state, so a blocked
+// peer cannot amplify append-only audit storage without bound.
+func (service *Service) recordLoginBlockTransitions(ctx context.Context, transitions loginBlockTransitions, input LoginInput, now time.Time) error {
+	for _, transition := range []struct {
+		value      loginBlockTransitions
+		reasonCode string
+	}{
+		{value: accountBlockTransition, reasonCode: "account_rate_limit"},
+		{value: ipBlockTransition, reasonCode: "ip_rate_limit"},
+	} {
+		if !transitions.includes(transition.value) {
+			continue
+		}
+		if err := service.audit.Record(ctx, audit.Event{
+			OccurredAt: now,
+			Type:       audit.EventLoginRateLimited,
+			Outcome:    audit.OutcomeDenied,
+			RequestID:  input.RequestID,
+			RemoteIP:   input.RemoteIP,
+			Metadata:   map[string]string{"reason_code": transition.reasonCode},
+		}); err != nil {
+			return fmt.Errorf("record login rate-limit transition: %w", err)
+		}
+	}
+	return nil
 }
 
 func (service *Service) Authenticate(ctx context.Context, tokenValue, requestID, remoteIP string) (Identity, error) {

@@ -66,7 +66,12 @@ func (server *server) putUploadChunk(w http.ResponseWriter, request *http.Reques
 		writeError(w, request, http.StatusBadRequest, "invalid_request", "The chunk index is invalid.")
 		return
 	}
-	checksum, err := parseRequiredSHA256(request.Header.Get("X-Chunk-SHA256"))
+	checksumValues := request.Header.Values("X-Chunk-SHA256")
+	if len(checksumValues) != 1 {
+		writeError(w, request, http.StatusBadRequest, "invalid_request", "Exactly one chunk checksum is required.")
+		return
+	}
+	checksum, err := parseRequiredSHA256(checksumValues[0])
 	if err != nil {
 		writeError(w, request, http.StatusBadRequest, "invalid_request", "The chunk checksum is invalid.")
 		return

@@ -25,6 +25,17 @@ type loginLimitEntry struct {
 	failures      int
 }
 
+type loginBlockTransitions uint8
+
+const (
+	accountBlockTransition loginBlockTransitions = 1 << iota
+	ipBlockTransition
+)
+
+func (transitions loginBlockTransitions) includes(transition loginBlockTransitions) bool {
+	return transitions&transition != 0
+}
+
 type LoginLimiter struct {
 	mu             sync.Mutex
 	accountEntries map[loginLimitKey]loginLimitEntry
@@ -61,7 +72,7 @@ func (limiter *LoginLimiter) Check(username, remoteIP string, now time.Time) (ti
 	return retryAfter, retryAfter > 0
 }
 
-func (limiter *LoginLimiter) RecordFailure(username, remoteIP string, now time.Time) {
+func (limiter *LoginLimiter) RecordFailure(username, remoteIP string, now time.Time) loginBlockTransitions {
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
 
@@ -70,12 +81,23 @@ func (limiter *LoginLimiter) RecordFailure(username, remoteIP string, now time.T
 	if _, exists := limiter.accountEntries[accountKey]; !exists && len(limiter.accountEntries) >= limiter.maxEntries {
 		removeOne(limiter.accountEntries)
 	}
-	limiter.accountEntries[accountKey] = recordFailure(limiter.accountEntries[accountKey], now, AccountFailureLimit)
+	accountEntry, accountBlocked := recordFailure(limiter.accountEntries[accountKey], now, AccountFailureLimit)
+	limiter.accountEntries[accountKey] = accountEntry
 
 	if _, exists := limiter.ipEntries[remoteIP]; !exists && len(limiter.ipEntries) >= limiter.maxEntries {
 		removeOne(limiter.ipEntries)
 	}
-	limiter.ipEntries[remoteIP] = recordFailure(limiter.ipEntries[remoteIP], now, IPFailureLimit)
+	ipEntry, ipBlocked := recordFailure(limiter.ipEntries[remoteIP], now, IPFailureLimit)
+	limiter.ipEntries[remoteIP] = ipEntry
+
+	var transitions loginBlockTransitions
+	if accountBlocked {
+		transitions |= accountBlockTransition
+	}
+	if ipBlocked {
+		transitions |= ipBlockTransition
+	}
+	return transitions
 }
 
 func (limiter *LoginLimiter) Clear(username, remoteIP string) {
@@ -108,7 +130,7 @@ func (limiter *LoginLimiter) cleanupIfDue(now time.Time) {
 	limiter.lastCleanup = now
 }
 
-func recordFailure(entry loginLimitEntry, now time.Time, limit int) loginLimitEntry {
+func recordFailure(entry loginLimitEntry, now time.Time, limit int) (loginLimitEntry, bool) {
 	if entry.windowStarted.IsZero() || now.Sub(entry.windowStarted) > LoginFailureWindow {
 		entry.windowStarted = now
 		entry.failures = 0
@@ -116,10 +138,11 @@ func recordFailure(entry loginLimitEntry, now time.Time, limit int) loginLimitEn
 	}
 	entry.failures++
 	entry.lastSeen = now
+	newlyBlocked := entry.failures == limit
 	if entry.failures >= limit {
 		entry.blockedUntil = now.Add(LoginBlockDuration)
 	}
-	return entry
+	return entry, newlyBlocked
 }
 
 func removeOne[K comparable](entries map[K]loginLimitEntry) {
