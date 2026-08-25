@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -40,8 +41,8 @@ func TestMigrateCreatesAuthenticationSchemaAndIsRepeatable(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrationCount != 1 {
-		t.Fatalf("migration count = %d; want 1", migrationCount)
+	if migrationCount != 6 {
+		t.Fatalf("migration count = %d; want 6", migrationCount)
 	}
 
 	rows, err := db.QueryContext(ctx, `
@@ -67,9 +68,134 @@ func TestMigrateCreatesAuthenticationSchemaAndIsRepeatable(t *testing.T) {
 		t.Fatalf("iterate tables: %v", err)
 	}
 
-	wantTables := []string{"schema_migrations", "sessions", "users"}
+	wantTables := []string{
+		"audit_events",
+		"file_entries",
+		"file_index_generations",
+		"file_index_state",
+		"schema_migrations",
+		"sessions",
+		"trash_entries",
+		"upload_chunks",
+		"uploads",
+		"users",
+	}
 	if !reflect.DeepEqual(tables, wantTables) {
 		t.Fatalf("tables = %v; want %v", tables, wantTables)
+	}
+}
+
+func TestBackendV1MigrationConstraintsAndIndexes(t *testing.T) {
+	db := openTestDatabase(t)
+	ctx := context.Background()
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	var triggerCount int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sqlite_schema
+		WHERE type = 'trigger' AND name IN ('audit_events_reject_update', 'audit_events_reject_delete')
+	`).Scan(&triggerCount); err != nil {
+		t.Fatalf("count audit triggers: %v", err)
+	}
+	if triggerCount != 2 {
+		t.Fatalf("audit trigger count = %d; want 2", triggerCount)
+	}
+
+	var indexCount int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sqlite_schema
+		WHERE type = 'index' AND name IN (
+			'audit_events_occurred_idx', 'audit_events_type_idx',
+			'audit_events_actor_idx', 'audit_events_outcome_idx',
+			'trash_entries_user_time_idx', 'uploads_user_time_idx', 'uploads_cleanup_idx'
+		)
+	`).Scan(&indexCount); err != nil {
+		t.Fatalf("count backend-v1 indexes: %v", err)
+	}
+	if indexCount != 7 {
+		t.Fatalf("backend-v1 index count = %d; want 7", indexCount)
+	}
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO uploads (
+			id, user_id, target_path, part_name, total_size, chunk_size,
+			total_chunks, status, created_at, updated_at, expires_at
+		) VALUES ('upload-id-123456', 999, 'file.bin', 'upload.part', 1, 4194304, 1, 'pending', 1, 1, 2)
+	`); err == nil {
+		t.Fatal("upload with missing user insert succeeded; want foreign-key error")
+	}
+
+	result, err := db.ExecContext(ctx, `
+		INSERT INTO users (username, password_hash, role, created_at, updated_at)
+		VALUES ('migration-owner', 'encoded-hash', 'owner', 1, 1)
+	`)
+	if err != nil {
+		t.Fatalf("insert migration constraint user: %v", err)
+	}
+	userID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("read migration constraint user ID: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO uploads (
+			id, user_id, target_path, part_name, total_size, chunk_size,
+			total_chunks, status, created_at, updated_at, expires_at
+		) VALUES ('invalid-chunks-1', ?, 'file.bin', 'invalid.part', 4194305, 4194304, 1, 'pending', 1, 1, 2)
+	`, userID); err == nil {
+		t.Fatal("upload with inconsistent total_chunks succeeded; want check constraint error")
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO audit_events (occurred_at, event_type, outcome, metadata_json)
+		VALUES (1, 'test.invalid_metadata', 'failure', 'not-json')
+	`); err == nil {
+		t.Fatal("audit event with invalid metadata JSON succeeded; want check constraint error")
+	}
+}
+
+func TestFileIndexAndAuditLogicalPathMigrationConstraints(t *testing.T) {
+	db := openTestDatabase(t)
+	ctx := context.Background()
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	var activeGeneration, healthy int64
+	if err := db.QueryRowContext(ctx, `SELECT active_generation_id, healthy FROM file_index_state WHERE singleton = 1`).Scan(&activeGeneration, &healthy); err != nil || activeGeneration != 1 || healthy != 1 {
+		t.Fatalf("initial index state = generation %d healthy %d, %v", activeGeneration, healthy, err)
+	}
+	insertEntry := func(trash any) error {
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO file_entries (
+				generation_id, logical_path, parent_path, name, normalized_name,
+				normalized_path, kind, size, modified_at, indexed_at, trash_entry_id
+			) VALUES (1, 'docs/a.txt', 'docs', 'a.txt', 'a.txt', 'docs/a.txt', 'file', 1, 1, 1, ?)
+		`, trash)
+		return err
+	}
+	if err := insertEntry(nil); err != nil {
+		t.Fatalf("insert active file index entry: %v", err)
+	}
+	if err := insertEntry(nil); err == nil {
+		t.Fatal("duplicate active path succeeded")
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE file_entries SET trash_entry_id = '0123456789abcdef' WHERE logical_path = 'docs/a.txt'`); err != nil {
+		t.Fatalf("mark old path trashed: %v", err)
+	}
+	if err := insertEntry(nil); err != nil {
+		t.Fatalf("active path alongside trashed old path error = %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO audit_events (occurred_at, event_type, outcome, resource_path, destination_path)
+		VALUES (1, 'test.logical_paths', 'success', 'docs/a.txt', 'archive/a.txt')
+	`); err != nil {
+		t.Fatalf("insert bounded logical audit paths: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO audit_events (occurred_at, event_type, outcome, resource_path)
+		VALUES (1, 'test.long_path', 'success', ?)
+	`, strings.Repeat("a", 4097)); err == nil {
+		t.Fatal("oversized audit resource path succeeded")
 	}
 }
 

@@ -2,6 +2,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -25,9 +26,45 @@ const (
 	maximumSaltLength     = 64
 	minimumKeyLength      = 16
 	maximumKeyLength      = 64
+	DefaultArgon2Limit    = 4
+	MaximumArgon2Limit    = 64
+	argon2AdmissionFactor = 4
 )
 
-var ErrInvalidPasswordHash = errors.New("invalid encoded password hash")
+var (
+	ErrInvalidPasswordHash = errors.New("invalid encoded password hash")
+	ErrInvalidArgon2Limit  = errors.New("invalid Argon2 concurrency limit")
+	ErrArgon2Busy          = errors.New("Argon2 work queue is full")
+)
+
+type passwordDeriver func(password, salt []byte, iterations, memory uint32, parallelism uint8, keyLength uint32) []byte
+
+// PasswordManager is the process-local resource boundary for every Argon2id
+// hash and verification. Waiting callers do not spawn helper goroutines and
+// can abandon the wait through their context.
+type PasswordManager struct {
+	slots      chan struct{}
+	admissions chan struct{}
+	parameters PasswordParameters
+	random     io.Reader
+	derive     passwordDeriver
+}
+
+func NewPasswordManager(maxConcurrent int) (*PasswordManager, error) {
+	if maxConcurrent == 0 {
+		maxConcurrent = DefaultArgon2Limit
+	}
+	if maxConcurrent < 1 || maxConcurrent > MaximumArgon2Limit {
+		return nil, ErrInvalidArgon2Limit
+	}
+	return &PasswordManager{
+		slots:      make(chan struct{}, maxConcurrent),
+		admissions: make(chan struct{}, maxConcurrent*argon2AdmissionFactor),
+		parameters: DefaultPasswordParameters(),
+		random:     rand.Reader,
+		derive:     argon2.IDKey,
+	}, nil
+}
 
 // PasswordParameters are embedded into each generated password hash so they
 // can be changed for new passwords without breaking verification of old ones.
@@ -51,31 +88,27 @@ func DefaultPasswordParameters() PasswordParameters {
 	}
 }
 
-// HashPassword returns a PHC-style, self-describing Argon2id password hash.
-func HashPassword(password string) (string, error) {
-	return hashPassword(password, DefaultPasswordParameters(), rand.Reader)
+// Hash returns a PHC-style, self-describing Argon2id password hash.
+func (manager *PasswordManager) Hash(ctx context.Context, password string) (string, error) {
+	return manager.hash(ctx, password, manager.parameters, manager.random)
 }
 
-// VerifyPassword checks password against an encoded hash. A malformed or
+// Verify checks password against an encoded hash. A malformed or
 // defensively out-of-bounds hash returns ErrInvalidPasswordHash.
-func VerifyPassword(password, encodedHash string) (bool, error) {
+func (manager *PasswordManager) Verify(ctx context.Context, password, encodedHash string) (bool, error) {
 	parameters, salt, expectedHash, err := parsePasswordHash(encodedHash)
 	if err != nil {
 		return false, err
 	}
 
-	actualHash := argon2.IDKey(
-		[]byte(password),
-		salt,
-		parameters.Iterations,
-		parameters.MemoryKiB,
-		parameters.Parallelism,
-		parameters.KeyLength,
-	)
+	actualHash, err := manager.deriveKey(ctx, []byte(password), salt, parameters)
+	if err != nil {
+		return false, err
+	}
 	return subtle.ConstantTimeCompare(actualHash, expectedHash) == 1, nil
 }
 
-func hashPassword(password string, parameters PasswordParameters, random io.Reader) (string, error) {
+func (manager *PasswordManager) hash(ctx context.Context, password string, parameters PasswordParameters, random io.Reader) (string, error) {
 	if err := validatePasswordParameters(parameters); err != nil {
 		return "", err
 	}
@@ -85,14 +118,10 @@ func hashPassword(password string, parameters PasswordParameters, random io.Read
 		return "", fmt.Errorf("generate password salt: %w", err)
 	}
 
-	derivedHash := argon2.IDKey(
-		[]byte(password),
-		salt,
-		parameters.Iterations,
-		parameters.MemoryKiB,
-		parameters.Parallelism,
-		parameters.KeyLength,
-	)
+	derivedHash, err := manager.deriveKey(ctx, []byte(password), salt, parameters)
+	if err != nil {
+		return "", err
+	}
 
 	return fmt.Sprintf(
 		"$%s$v=%d$m=%d,t=%d,p=%d$%s$%s",
@@ -104,6 +133,22 @@ func hashPassword(password string, parameters PasswordParameters, random io.Read
 		base64.RawStdEncoding.EncodeToString(salt),
 		base64.RawStdEncoding.EncodeToString(derivedHash),
 	), nil
+}
+
+func (manager *PasswordManager) deriveKey(ctx context.Context, password, salt []byte, parameters PasswordParameters) ([]byte, error) {
+	select {
+	case manager.admissions <- struct{}{}:
+		defer func() { <-manager.admissions }()
+	default:
+		return nil, ErrArgon2Busy
+	}
+	select {
+	case manager.slots <- struct{}{}:
+		defer func() { <-manager.slots }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return manager.derive(password, salt, parameters.Iterations, parameters.MemoryKiB, parameters.Parallelism, parameters.KeyLength), nil
 }
 
 func parsePasswordHash(encodedHash string) (PasswordParameters, []byte, []byte, error) {

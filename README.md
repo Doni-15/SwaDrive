@@ -158,3 +158,32 @@ Setiap endpoint protected harus memiliki negative authorization tests. Implement
 Repository ini layak menjadi flagship sebagai engineering work-in-progress, bukan produk selesai. Foundation dan security model sudah nyata, tetapi application authentication, file API, dan Flutter product flow belum tersedia.
 
 Project belum memiliki stable release atau lisensi open-source. Lihat [SECURITY.md](SECURITY.md) untuk pelaporan masalah keamanan.
+
+## Backend v1
+
+Backend v1 is implemented and verified locally but has not been deployed to
+production.
+
+The current Go backend includes:
+
+- application authentication with Argon2id password hashing;
+- opaque, independently revocable server-side sessions;
+- bounded login-abuse protection and security audit events;
+- authenticated file listing, metadata, search, move, trash, and restore;
+- streaming downloads with HTTP Range support;
+- persistent fixed-chunk resumable uploads;
+- a rebuildable SQLite metadata index for normal list/search/metadata reads;
+- explicit local-admin owner bootstrap and metadata reindex commands;
+- path-traversal and symlink-escape protections;
+- bounded resource usage for expensive authentication and transfer work.
+
+Normal metadata operations are served from SQLite. User file bytes remain on
+the filesystem and are accessed only when content I/O or a filesystem mutation
+is required.
+
+The backend has passed unit/integration tests, `go vet`, race testing, static
+Linux builds, and vulnerability scanning with no reachable known
+vulnerabilities at the time of the backend-v1 verification.
+
+See ADR-0003 through ADR-0005 for the authentication, resumable-upload, and
+metadata-plane decisions.

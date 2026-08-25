@@ -28,6 +28,11 @@ Passwords are hashed with Argon2id and stored in a self-describing encoded
 format containing the algorithm version, parameters, salt, and derived hash.
 Password-hashing parameters and verification are centralized so new hashes can
 use upgraded parameters while existing hashes remain verifiable.
+All Argon2id work passes through one injected, context-aware process-local gate
+(four concurrent operations by default) so an authentication flood cannot
+multiply the 64 MiB derivation memory without bound. Owner bootstrap uses the
+same gate. Password hashes exist only in an unexported auth credential type;
+normal user and authenticated identity models cannot carry credential data.
 
 Authentication uses opaque server-side sessions rather than JWTs. Each login
 generates a cryptographically random 256-bit token with `crypto/rand`. The raw,
@@ -47,6 +52,12 @@ success and failure, logout, session revocation, and other security-sensitive
 account events will be audited without recording passwords, password hashes,
 or raw session tokens.
 
+When security state and audit share SQLite, initial-owner creation, successful
+session creation, logout, and session revocation append their audit row in the
+same explicit transaction as the state change. Either both commit or neither
+does. Login failure limiting remains process-local and uses a bounded
+username+peer bucket plus a looser peer-wide username-spray bucket.
+
 `GET /api/v1/health` remains unauthenticated at the application layer. Its
 network reachability remains restricted by the private Tailscale boundary.
 
@@ -61,6 +72,8 @@ network reachability remains restricted by the private Tailscale boundary.
   multiple devices concurrently.
 - The server must perform a database lookup for protected requests and enforce
   expiry, revocation, disabled-user, and authorization rules.
+- Argon2 concurrency is bounded per process, so multi-process deployment would
+  require a separate shared resource-control design.
 - Clients must protect the raw token in platform-appropriate secure storage.
 - Initial session behavior stays small and predictable, at the cost of
   requiring a new login after absolute expiration.

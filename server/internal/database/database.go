@@ -13,8 +13,11 @@ import (
 )
 
 const (
-	driverName         = "sqlite"
-	busyTimeoutMillis  = "5000"
+	driverName        = "sqlite"
+	busyTimeoutMillis = "5000"
+	// WAL allows concurrent readers, but SQLite still serializes writers. Four
+	// connections are enough to let reads progress without manufacturing a
+	// large pool of writers that can only contend on the same database file.
 	maxOpenConnections = 4
 )
 
@@ -53,6 +56,10 @@ func dataSourceName(path string) string {
 	query.Set("_foreign_keys", "on")
 	query.Set("_journal_mode", "wal")
 	query.Set("_synchronous", "full")
+	// Every explicit transaction in the backend mutates state. Acquiring the
+	// single SQLite writer slot at BeginTx avoids deferred read-to-write upgrade
+	// failures while the busy timeout is still able to wait for the prior writer.
+	query.Set("_txlock", "immediate")
 
 	return (&url.URL{
 		Scheme:   "file",

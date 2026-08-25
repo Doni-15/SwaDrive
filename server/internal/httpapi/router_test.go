@@ -10,7 +10,7 @@ func TestHealthEndpoint(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
 	rec := httptest.NewRecorder()
 
-	NewHandler().ServeHTTP(rec, req)
+	NewHandler(Dependencies{}).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status code = %d; want %d", rec.Code, http.StatusOK)
