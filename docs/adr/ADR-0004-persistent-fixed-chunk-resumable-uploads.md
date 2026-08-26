@@ -1,115 +1,130 @@
-# ADR-0004: Use Persistent Fixed-Chunk Resumable Uploads
+# ADR-0004: Menggunakan Resumable Upload Berbasis Fixed Chunk yang Persisten
 
-- **Status:** Accepted
-- **Scope:** Backend v1 architecture
+- **Status:** Diterima
+- **Cakupan:** Arsitektur backend `v1.0.0`
 
-## Context
+## Konteks
 
-SwaDrive must upload both small files and files much larger than available
-memory across unstable mobile networks. Interrupted transfers need to resume
-after a request failure or server restart without exposing partial files in the
-normal file tree. Completion must reject missing or corrupt content and must
-not silently replace an existing destination.
+SwaDrive harus dapat melakukan upload file kecil maupun file yang jauh lebih
+besar daripada memori yang tersedia melalui jaringan seluler yang tidak stabil.
+Transfer yang terputus harus dapat dilanjutkan setelah kegagalan request atau
+restart server tanpa mengekspos file parsial dalam file tree normal. Finalisasi
+harus menolak isi yang hilang atau rusak dan tidak boleh mengganti file yang
+sudah ada pada path tujuan secara diam-diam.
 
-Adopting a separate small-file route would duplicate transfer and integrity
-rules. Storing one temporary file per chunk would also multiply filesystem
-objects and require a second assembly pass or copy at completion.
+Mengadopsi route terpisah untuk file kecil akan menduplikasi rule transfer dan
+integritas. Menyimpan satu file sementara per chunk juga akan memperbanyak objek
+filesystem dan memerlukan tahap assembly atau penyalinan kedua saat finalisasi.
 
-## Decision
+## Keputusan
 
-Use one server-side upload session protocol for all file sizes. Upload creation
-persists the logical target path, total size, a fixed chunk size, total chunk
-count, expiration, status, and an optional whole-file SHA-256. Allowed chunk
-sizes are 1, 2, 4, 8, and 16 MiB; 4 MiB is the default and 16 MiB is the
-maximum.
+Gunakan satu protocol resumable upload berbasis server-side session untuk semua
+ukuran file. Pembuatan upload menyimpan logical target path, ukuran total,
+ukuran fixed chunk, jumlah total chunk, masa berlaku, status, dan SHA-256
+keseluruhan file yang opsional. Ukuran chunk yang diizinkan adalah 1, 2, 4, 8,
+dan 16 MiB; default-nya 4 MiB dan maksimum 16 MiB.
 
-Each upload owns one randomly named `.part` file below the internal `uploads/`
-root. Chunks are written at deterministic offsets. SQLite records each verified
-chunk's index, offset, size, SHA-256, and receipt time under a composite primary
-key. The server verifies exact expected length and the client-supplied chunk
-checksum before recording progress. Retrying the same index with the same
-length and checksum succeeds idempotently; conflicting content is rejected.
-The body is streamed through a 64 KiB buffer into a deterministic offset; a
-complete chunk is never buffered in RAM. Different indexes may hold shared
-per-upload access and write concurrently. A temporary per-index gate
-serializes same-index retries, while completion, cancellation, and cleanup take
-exclusive per-upload access and wait for in-flight chunks.
+Setiap upload memiliki satu file `.part` dengan nama acak di bawah root internal
+`uploads/`. Chunk ditulis pada offset deterministik. SQLite mencatat index,
+offset, ukuran, SHA-256, dan waktu penerimaan setiap chunk yang telah
+diverifikasi menggunakan composite primary key. Server memverifikasi panjang
+tepat yang diharapkan dan checksum chunk dari client sebelum mencatat progress.
+Retry pada index yang sama dengan panjang dan checksum yang sama berhasil
+secara idempotent; isi yang berkonflik ditolak. Body dialirkan melalui
+buffer 64 KiB ke offset deterministik; satu chunk lengkap tidak pernah
+ditampung dalam RAM. Index berbeda dapat memakai akses per-upload bersama dan
+menulis secara concurrent. Gate sementara per index menserialisasi retry pada
+index yang sama, sedangkan finalisasi, pembatalan, dan cleanup mengambil akses
+per-upload eksklusif serta menunggu chunk yang masih berjalan.
 
-Completion is serialized per upload. It requires every chunk, verifies the
-part-file size and optional whole-file SHA-256, syncs the file, changes the
-database status to `finalizing`, and atomically renames the part file within the
-same configured storage root into `files/`. It then marks the upload
-`completed` and inserts the active metadata-index row. The intermediate status
-lets a restarted service reconcile a rename that succeeded before the final
-status/index update. Existing destinations are never overwritten. The
-completed status, file-index insertion, and completion audit event commit in
-one SQLite transaction, so a failure leaves the durable `finalizing` recovery
-state and marks known metadata disagreement unhealthy.
+Finalisasi diserialisasi per upload. Proses ini mensyaratkan semua chunk,
+memverifikasi ukuran file `.part` dan SHA-256 keseluruhan file yang opsional,
+melakukan sync file, mengubah status database menjadi `finalizing`, lalu secara
+atomik melakukan rename pada file `.part` ke dalam `files/` pada storage root
+yang sama. Upload kemudian ditandai `completed` dan baris metadata index aktif
+ditambahkan. Status perantara memungkinkan service yang telah restart
+merekonsiliasi rename yang berhasil sebelum pembaruan status dan index
+terakhir. File yang sudah ada pada path tujuan tidak pernah ditimpa. Status
+`completed`, penambahan file index, dan audit event finalisasi di-commit dalam
+satu transaction SQLite; kegagalan
+membiarkan state `finalizing` yang durable untuk recovery dan menandai
+ketidaksesuaian metadata yang diketahui sebagai unhealthy.
 
-Before HTTP serving, startup inspects only known `finalizing` uploads in bounded
-batches. Part present/destination absent resets to pending; part absent/
-destination present confirms the index and completes with audit; both present
-or both absent stops startup. This is targeted reconciliation, not a content
-tree scan. A shared process-local mutation coordinator prevents a concurrent
-file move/trash from interleaving between publication and index commit.
+Sebelum melayani HTTP, startup hanya memeriksa upload `finalizing` yang telah
+diketahui dalam batch terbatas. Jika part tersedia dan path tujuan belum ada,
+status dikembalikan ke pending. Jika part tidak ada dan path tujuan tersedia,
+index dikonfirmasi dan upload diselesaikan beserta audit. Jika keduanya tersedia
+atau keduanya tidak tersedia, startup dihentikan. Ini merupakan targeted
+reconciliation, bukan content tree scan. Satu process-local mutation
+coordinator yang dipakai bersama mencegah operasi move atau trash secara
+concurrent berselang di antara publikasi dan commit index.
 
-Unfinished uploads expire after 24 hours. A cancellable periodic worker removes
-expired part files and marks their database sessions expired. Creation checks
-space for the complete upload plus a configurable reserve, and chunk receipt
-rechecks space. The default reserve is 1 GiB.
-These checks are advisory rather than reservations. Server-wide chunk streams
-default to eight, active uploads are capped at 100 per user, and each upload is
-capped at 1,000,000 chunks. With the smallest chunk this still permits roughly
-1 TiB; larger chunk selections permit proportionally larger files.
+Upload yang belum selesai kedaluwarsa setelah 24 jam. Periodic worker yang dapat
+dibatalkan menghapus file `.part` yang kedaluwarsa dan menandai upload session
+dalam database sebagai expired. Saat pembuatan, ruang untuk upload lengkap
+beserta reserve yang dapat dikonfigurasi diperiksa; penerimaan chunk memeriksa
+ulang ruang tersebut. Default reserve adalah 1 GiB. Pemeriksaan ini bersifat
+advisory, bukan reservation. Secara default, server membatasi stream chunk
+concurrent hingga delapan dan upload aktif hingga 100 per pengguna. Setiap
+upload dibatasi hingga 1,000,000 chunk. Dengan chunk terkecil, batas ini masih
+mengizinkan sekitar 1 TiB. Pilihan chunk yang lebih besar memungkinkan file
+yang lebih besar secara proporsional.
 
-Creation necessarily has a narrow filesystem-before-SQLite window in which an
-internal `.part` can exist without an upload row. It is never published or
-visible through metadata APIs. Recovery is an explicit offline local-admin
-operation: `reconcile-upload-parts` first reports a dry-run, scans only the
-internal uploads directory in bounded batches, and considers only strict
-lowercase 128-bit-hex `.part` names that are regular files, older than the
-configured minimum age, and absent from SQLite. Deletion requires `-apply`.
-The command never reads content or prints internal names/host paths. A scan-limit
-failure performs no partial deletion.
+Pembuatan upload pasti memiliki window sempit filesystem-before-SQLite, tempat
+file internal `.part` dapat tersedia tanpa baris upload. File tersebut tidak
+pernah dipublikasikan atau terlihat melalui API metadata. Recovery merupakan
+operasi offline eksplisit oleh administrator lokal: `reconcile-upload-parts`
+terlebih dahulu melaporkan dry-run, hanya memindai directory `uploads/` yang
+bersifat internal dalam batch terbatas, dan hanya mempertimbangkan nama `.part`
+yang mengikuti format hex 128-bit dengan huruf lowercase secara ketat, berupa
+regular file, lebih tua daripada umur minimum yang dikonfigurasi, serta tidak
+tercatat dalam SQLite. Penghapusan memerlukan `-apply`. Command tersebut tidak
+pernah membaca isi file atau mencetak nama internal maupun host path. Jika
+batas scan terlampaui, command gagal tanpa melakukan penghapusan parsial.
 
-If cancel/expiration removes a known part and the process dies before updating
-SQLite, a restarted expiration cleanup treats the missing part as already
-removed and durably expires the known pending row. It never creates an index
-entry.
+Jika pembatalan atau kedaluwarsa menghapus part yang diketahui dan proses
+berhenti sebelum memperbarui SQLite, cleanup setelah restart memperlakukan part
+yang hilang sebagai sudah dihapus dan secara durable menandai baris pending yang
+diketahui sebagai expired. Proses ini tidak pernah membuat entry index.
 
-Downloads use standard HTTP byte Range behavior rather than a separate
-download-session protocol.
+Download memakai perilaku byte Range HTTP standar, bukan protocol download
+berbasis session yang terpisah.
 
-## Consequences
+## Konsekuensi
 
-- Small and large files share one integrity and publication path.
-- Upload progress survives process restarts without storing file bytes in
-  SQLite or retaining a separate file for every chunk.
-- Chunk-copy memory is about 64 KiB per active request rather than proportional
-  to the selected 1-16 MiB chunk size.
-- Partial content remains outside normal listing, search, and download APIs
-  until atomic publication succeeds.
-- Normal upload-status reads and partial uploads remain on the SQLite metadata
-  plane and never require an HDD tree scan.
-- Clients must retain the upload ID, selected chunk size, and source-file
-  identity needed to resume safely.
-- Per-upload synchronization is process-local; backend v1 assumes one server
-  process owns a configured database and storage root.
-- Preflight checks reduce disk-exhaustion risk but are not quota reservation;
-  concurrent uploads and unrelated writers may consume space between checks.
+- File kecil dan besar memakai satu path integritas dan publikasi.
+- Progress upload bertahan melewati restart proses tanpa menyimpan isi file
+  dalam SQLite atau mempertahankan file terpisah untuk setiap chunk.
+- Memori penyalinan chunk sekitar 64 KiB per request aktif, bukan proporsional
+  terhadap ukuran chunk 1-16 MiB yang dipilih.
+- Isi parsial tetap berada di luar API listing, pencarian, dan download
+  normal sampai publikasi atomik berhasil.
+- Pembacaan status upload normal dan upload parsial tetap berada pada metadata
+  plane SQLite dan tidak pernah memerlukan HDD tree scan.
+- Client harus menyimpan upload ID, ukuran chunk yang dipilih, dan
+  source-file identity yang diperlukan untuk melanjutkan upload dengan aman.
+- Sinkronisasi per upload bersifat process-local; backend `v1.0.0` mengasumsikan
+  satu proses backend memiliki database dan storage root yang dikonfigurasi.
+- Pemeriksaan preflight mengurangi risiko kehabisan disk, tetapi bukan quota
+  reservation; upload concurrent dan writer lain dapat memakai ruang di antara
+  pemeriksaan.
 
-## Alternatives Rejected
+## Alternatif yang Ditolak
 
-- **Separate direct upload for small files:** rejected because it duplicates
-  validation, authorization, audit, conflict, and finalization behavior.
-- **JWT or client-only upload progress:** rejected because restart-safe progress
-  and authoritative integrity state belong on the server.
-- **One temporary file per chunk:** rejected because it creates more filesystem
-  objects and requires assembly work at completion.
-- **A fixed 8 MiB chunk for every client:** rejected because unstable mobile
-  links benefit from 1-4 MiB chunks while stable clients may choose 8 or 16 MiB.
-- **Silent destination overwrite:** rejected because an upload must not destroy
-  an existing file without an explicit future overwrite policy.
-- **TUS in backend v1:** rejected as unnecessary protocol/framework complexity
-  for the current private single-server requirements; it may be reconsidered
-  through a superseding decision if interoperability needs change.
+- **Direct upload terpisah untuk file kecil:** ditolak karena menduplikasi
+  perilaku validasi, otorisasi, audit, conflict, dan finalisasi.
+- **JWT atau progress upload hanya pada client:** ditolak karena progress yang
+  aman terhadap restart dan state integritas otoritatif harus berada pada
+  server.
+- **Satu file sementara per chunk:** ditolak karena menambah objek filesystem
+  dan memerlukan pekerjaan assembly saat finalisasi.
+- **Fixed chunk 8 MiB untuk setiap client:** ditolak karena koneksi seluler yang
+  tidak stabil memperoleh manfaat dari chunk 1-4 MiB, sedangkan client dengan
+  koneksi stabil dapat memilih 8 atau 16 MiB.
+- **Overwrite path tujuan secara diam-diam:** ditolak karena upload tidak boleh
+  menghancurkan file yang sudah ada tanpa kebijakan overwrite eksplisit di masa
+  mendatang.
+- **TUS pada backend `v1.0.0`:** ditolak karena menambah kompleksitas protocol
+  atau framework yang tidak diperlukan untuk kebutuhan privat satu server saat
+  ini; keputusan ini dapat ditinjau ulang melalui ADR pengganti jika kebutuhan
+  interoperability berubah.

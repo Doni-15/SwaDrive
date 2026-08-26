@@ -1,68 +1,72 @@
 # Changelog
 
-All notable SwaDrive project changes are recorded here.
+Semua perubahan penting pada proyek SwaDrive dicatat di sini.
 
 ## [Unreleased]
 
-Next major target: `v2.0.0`.
+Target major berikutnya adalah `v2.0.0`.
 
-No `v2.0.0` feature is recorded as completed. See the
-[`NEXT` release flag](docs/releases/NEXT.md) for planning status.
+Belum ada fitur `v2.0.0` yang dicatat sebagai selesai. Lihat
+[penanda rilis `NEXT`](docs/releases/NEXT.md) untuk status perencanaan.
 
-## [1.0.0] - 2026-08-26
+## [v1.0.0] - 2026-08-26
 
-First production release. The canonical release description and artifact
-provenance are available in the [`v1.0.0` release notes](docs/releases/v1.0.0.md).
+Rilis production pertama. Deskripsi kanonis dan provenance rilis
+tersedia dalam [catatan rilis `v1.0.0`](docs/releases/v1.0.0.md).
 
-### Added
+### Ditambahkan
 
-- Added the Go `/api/v1` backend with application authentication, owner
-  authorization, opaque independently revocable server-side sessions, and a
-  health endpoint.
-- Added owner-only logical-path APIs for file listing, metadata, search, folder
-  creation, move, trash, restore, and streaming HTTP Range downloads.
-- Added a rebuildable SQLite metadata index with generation-safe explicit
-  reindex and incremental maintenance for file mutations.
-- Added persistent fixed-chunk resumable uploads with per-chunk SHA-256,
-  optional whole-file verification, restart recovery, bounded concurrency, and
-  atomic no-overwrite publication.
-- Added append-only, owner-readable audit events for authentication, session,
-  file, and upload activity.
-- Added local `swadrive-admin` commands for initial owner bootstrap, metadata
-  reindex, and bounded orphan upload-part reconciliation with dry-run by
-  default.
+- Menambahkan backend Go `/api/v1` dengan autentikasi aplikasi, otorisasi owner,
+  server-side session berbasis opaque token yang dapat dicabut secara
+  independen, dan health endpoint.
+- Menambahkan API berbasis logical path khusus owner untuk listing file,
+  metadata, pencarian, pembuatan folder, pemindahan, trash, restore, dan
+  download streaming dengan HTTP Range.
+- Menambahkan metadata index SQLite yang dapat dibangun ulang, dengan reindex
+  eksplisit yang aman terhadap pergantian generation dan pemeliharaan
+  inkremental untuk mutasi file.
+- Menambahkan resumable upload berbasis fixed chunk yang persisten, dengan SHA-256 per
+  chunk, verifikasi keseluruhan file secara opsional, recovery setelah restart,
+  concurrency terbatas, dan publikasi atomik tanpa overwrite.
+- Menambahkan audit event append-only yang dapat dibaca owner untuk aktivitas
+  autentikasi, session, file, dan upload.
+- Menambahkan command lokal `swadrive-admin` untuk bootstrap owner awal, reindex
+  metadata, dan reconciliation terbatas terhadap orphan upload part dengan
+  dry-run sebagai default.
 
-### Security
+### Keamanan
 
-- Added Argon2id password hashing and storage of only SHA-256 digests for
-  cryptographically random 256-bit opaque session tokens.
-- Added bounded authentication and transfer resource gates, login abuse
-  limiting, strict security-header handling, and redacted operational logging.
-- Added owner authorization plus logical-path containment that rejects absolute
-  paths, traversal, encoded traversal, null bytes, and symlink escape.
-- Added canonical database process locking, storage volume identity validation,
-  same-filesystem checks, targeted startup reconciliation, and fail-closed
-  metadata consistency handling.
-- Separated Tailscale network reachability, application identity, human Linux
-  administration, and the restricted runtime service identity.
+- Menambahkan hash password Argon2id dan hanya menyimpan digest SHA-256 dari
+  opaque session token acak kriptografis 256-bit.
+- Menambahkan resource gate terbatas untuk autentikasi dan transfer, pembatasan
+  penyalahgunaan login, penanganan security header yang ketat, serta log
+  operasional yang telah disamarkan.
+- Menambahkan otorisasi owner dan containment logical path yang menolak absolute
+  path, traversal, encoded traversal, null byte, dan symlink escape.
+- Menambahkan process lock kanonis untuk database, validasi identitas volume
+  storage, pemeriksaan filesystem yang sama, targeted startup reconciliation,
+  dan penanganan konsistensi metadata secara fail-closed.
+- Memisahkan keterjangkauan jaringan Tailscale, identitas aplikasi, akses
+  administratif operator ke Linux, dan runtime service account terbatas.
 
-### Infrastructure
+### Infrastruktur
 
-- Deployed the frozen backend v1 baseline to a Debian production server on
-  2026-08-26 as a `systemd`-managed service running under
-  `personalcloud_service`.
-- Restricted backend access to the Tailscale private network on TCP `8080`,
-  without public exposure of the application port.
-- Established an NVMe control/metadata plane for SQLite and an HDD content
-  plane rooted at `/srv/personalcloud` for files, uploads, and trash.
-- Configured SwaDrive to fail closed when the production storage mount is
-  unavailable while allowing Debian itself to boot without the HDD.
+- Melakukan deployment baseline backend `v1.0.0` yang dibekukan ke server Debian
+  production pada 2026-08-26 sebagai service yang dikelola `systemd` dan
+  berjalan menggunakan `personalcloud_service`.
+- Membatasi akses backend ke jaringan privat Tailscale pada TCP `8080`, tanpa
+  mengekspos port aplikasi ke publik.
+- Menetapkan control/metadata plane pada NVMe untuk SQLite dan content plane
+  pada HDD dengan root `/srv/personalcloud` untuk file, upload, dan trash.
+- Mengonfigurasi SwaDrive agar fail-closed ketika mount storage production tidak
+  tersedia, sekaligus tetap memungkinkan Debian melakukan boot tanpa HDD.
 
-### Known Limitations
+### Keterbatasan yang Diketahui
 
-- The Flutter Android/Linux project remains a minimal scaffold without login,
-  file-browser, or transfer UX.
-- Backend v1 file, upload, and audit APIs are owner-only and support one server
-  process per database/storage-root pair.
-- Application-level encryption at rest, public sharing, content indexing,
-  thumbnails, OCR, and automatic audit/history retention are not provided.
+- Proyek Flutter untuk Android dan Linux masih berupa scaffold minimal tanpa UX
+  login, file browser, atau transfer.
+- API file, upload, dan audit pada `v1.0.0` hanya tersedia untuk owner dan
+  mendukung satu proses backend per pasangan database dan storage root.
+- Encryption at rest pada level aplikasi, berbagi file secara publik, content
+  indexing, thumbnail, OCR, serta retention otomatis untuk audit dan riwayat
+  belum tersedia.

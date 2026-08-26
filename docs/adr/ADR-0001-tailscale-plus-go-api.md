@@ -1,53 +1,54 @@
-# ADR-0001: Use Tailscale for Private Network Access and Go HTTP for Application Data
+# ADR-0001: Menggunakan Tailscale untuk Akses Jaringan Privat dan Go HTTP untuk Data Aplikasi
 
-- **Status:** Accepted
-- **Scope:** Locked architecture
+- **Status:** Diterima
+- **Cakupan:** Arsitektur yang telah ditetapkan
 
-## Context
+## Konteks
 
-SwaDrive needs private access from Linux and Android clients without exposing
-the storage server through public port forwarding. Network reachability,
-application authentication, and Linux administration solve different problems
-and must remain separate.
+SwaDrive memerlukan akses privat dari client Linux dan Android tanpa mengekspos
+storage server melalui public port forwarding. Keterjangkauan jaringan,
+autentikasi aplikasi, dan administrasi Linux menyelesaikan masalah yang berbeda
+dan harus tetap dipisahkan.
 
-SSH/SCP can support temporary bootstrap administration and deployment, but an
-application built on SSH would put administrative credentials and server access
-concerns into the Flutter client.
+SSH/SCP dapat mendukung bootstrap administrasi dan deployment sementara, tetapi
+aplikasi yang dibangun di atas SSH akan membawa credential administratif serta
+urusan akses server ke dalam client Flutter.
 
-## Decision
+## Keputusan
 
-Use Tailscale for private device-to-server network reachability and a Go HTTP
-API for all application data operations.
+Gunakan Tailscale untuk keterjangkauan jaringan privat dari perangkat ke server
+dan Go HTTP API untuk seluruh operasi data aplikasi.
 
 ```text
-Tailscale          device/network access
-Go HTTP API        application authentication, authorization, and file data
-SSH/SCP            administrator-only bootstrap and deployment
+Tailscale          akses perangkat/jaringan
+Go HTTP API        autentikasi, otorisasi, dan data file aplikasi
+SSH/SCP            bootstrap dan deployment khusus administrator
 ```
 
-The initial API prefix is `/api/v1` and the initial listener is TCP 8080. The
-intended Tailscale grant permits only an explicitly selected normal Member
-identity to reach the tagged storage server on TCP 8080. Flutter clients remain
-normal Member devices.
+Prefix API awal adalah `/api/v1` dan listener awal menggunakan TCP 8080. Grant
+Tailscale yang dimaksud hanya mengizinkan identitas Member biasa yang dipilih
+secara eksplisit untuk mencapai storage server bertag melalui TCP 8080. Client
+Flutter tetap menjadi perangkat Member biasa.
 
-Tailscale Serve is not required by this decision. Backend v1 implements its
-resumable-upload protocol over the Go HTTP API. HTTPS termination may be
-evaluated later without changing the boundary between private network access
-and application authorization.
+Keputusan ini tidak mewajibkan Tailscale Serve. Backend `v1.0.0`
+mengimplementasikan protocol resumable upload melalui Go HTTP API. Terminasi
+HTTPS dapat dievaluasi kemudian tanpa mengubah batas antara akses jaringan
+privat dan otorisasi aplikasi.
 
-Backend v1 does not terminate TLS in the Go process. Transport confidentiality
-therefore depends on production actually using and verifying the intended
-Tailscale path and ACLs. This is not an application-level encryption
-claim and does not provide encryption at rest for files or SQLite.
+Backend `v1.0.0` tidak melakukan terminasi TLS di dalam proses Go. Kerahasiaan
+transport bergantung pada penggunaan dan verifikasi path serta ACL Tailscale
+yang dimaksud di production. Hal ini bukan klaim encryption pada level aplikasi
+dan tidak menyediakan encryption at rest untuk file atau SQLite.
 
-## Consequences
+## Konsekuensi
 
-- No public port forwarding is required.
-- Flutter never needs an SSH private key or SFTP/SCP data path.
-- The API can support streaming, Range requests, progress, and resumable
-  transfers using HTTP semantics.
-- Tailscale reachability does not grant application permissions; Go must still
-  authenticate and authorize every protected operation.
-- Client devices need a working Tailscale connection to use the private API.
-- Any future listener or TLS change must preserve narrow network access and be
-  documented explicitly.
+- Public port forwarding tidak diperlukan.
+- Flutter tidak memerlukan SSH private key atau data path SFTP/SCP.
+- API dapat mendukung streaming, Range request, progress, dan resumable transfer
+  dengan semantik HTTP.
+- Keterjangkauan melalui Tailscale tidak memberikan permission aplikasi; Go
+  tetap harus mengautentikasi dan mengotorisasi setiap operasi yang dilindungi.
+- Perangkat client memerlukan koneksi Tailscale yang berfungsi untuk memakai
+  API privat.
+- Setiap perubahan listener atau TLS di masa mendatang harus mempertahankan
+  akses jaringan yang sempit dan didokumentasikan secara eksplisit.

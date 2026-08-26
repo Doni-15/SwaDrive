@@ -1,54 +1,65 @@
 # Arsitektur SwaDrive
 
-Dokumen ini menjelaskan arsitektur public yang tidak bergantung pada hostname, username, alamat akun, atau path production tertentu.
+Dokumen ini menjelaskan arsitektur publik SwaDrive tanpa bergantung pada
+hostname, username, alamat akun, atau path production tertentu. Status proyek
+dan rilis dijelaskan dalam [README](../README.md), sedangkan kontrol keamanan
+dirinci dalam [model keamanan](security-model.md).
 
 ## Komponen
 
 ```text
-Flutter clients
+client Flutter
     |
-    | private tailnet, application port only
+    | tailnet privat, hanya port aplikasi
     v
 storage server
     |
-    +-- systemd-managed Go API
-    |      restricted service account
+    +-- Go API yang dikelola systemd
+    |      service account terbatas
     |
-    +-- NVMe control/metadata plane
-    |      SQLite: auth, sessions, audit, upload/trash state, file index
+    +-- control/metadata plane pada NVMe
+    |      SQLite: auth, session, audit, state upload/trash, file index
     |
-    +-- HDD content plane (one filesystem)
+    +-- content plane pada HDD (satu filesystem)
            files/ uploads/ trash/
 ```
 
-Go API adalah satu-satunya application data plane. SSH atau secure copy hanya dapat dipakai administrator untuk deployment; keduanya bukan protocol client.
+Go API merupakan satu-satunya data plane aplikasi. SSH atau secure copy hanya
+digunakan administrator untuk deployment; keduanya bukan protocol yang dipakai
+client.
 
-## Batas Identitas
+## Batas Service dan Identitas
 
-| Identity | Kewenangan | Tidak boleh |
+| Identitas | Kewenangan | Tidak boleh |
 | --- | --- | --- |
-| Administrator account | OS, release, dan konfigurasi | menjalankan normal request sebagai runtime |
-| Service account | data/state yang memang perlu diubah API | sudo, login interaktif, mengganti binary, mengatur tailnet |
-| Tailnet member | mencapai port aplikasi yang diizinkan | memperoleh hak aplikasi secara otomatis |
-| Application user | operasi resource sesuai authorization | memperoleh akses OS atau tailnet administration |
+| Akun administrator | OS, rilis, dan konfigurasi | Menjalankan request normal sebagai runtime |
+| Service account | Data dan state yang memang perlu diubah API | Menggunakan sudo, login interaktif, mengganti binary, atau mengatur tailnet |
+| Anggota tailnet | Mencapai port aplikasi yang diizinkan | Memperoleh hak aplikasi secara otomatis |
+| Akun aplikasi SwaDrive | Mengoperasikan resource sesuai otorisasi | Memperoleh akses OS atau administrasi tailnet |
 
-## Ownership Generik
+## Batas Ownership
 
-- `$RELEASE_DIR` dan binary: administrator-owned, read/execute oleh service;
-- `$CONFIG_DIR`: administrator-controlled, minimal read bagi service;
-- `$STORAGE_ROOT` dan `.swadrive-volume`: mounted boundary yang
-  administrator-controlled; `files/`, `uploads/`, dan `trash/` di bawahnya adalah
-  service-writable content boundary;
-- `$STATE_DIR`: path yang dipilih administrator tetapi writable secukupnya oleh
-  service untuk database SQLite, WAL, SHM, application state, dan coordination
+- `$RELEASE_DIR` dan binary dimiliki administrator, dengan akses baca dan
+  eksekusi bagi service;
+- `$CONFIG_DIR` dikendalikan administrator, dengan akses baca minimum bagi
+  service;
+- `$STORAGE_ROOT` dan `.swadrive-volume` merupakan batas mount yang dikendalikan
+  administrator; `files/`, `uploads/`, dan `trash/` di bawahnya merupakan batas
+  penyimpanan yang dapat ditulis service;
+- `$STATE_DIR` dipilih administrator, tetapi dapat ditulis secukupnya oleh
+  service untuk database SQLite, WAL, SHM, state aplikasi, dan coordination
   lock;
-- `$LOG_DIR`: writable oleh service, tanpa secret atau file content.
+- `$LOG_DIR` dapat ditulis service, tanpa secret atau isi file.
 
-Permission issue harus diperbaiki secara sempit. `chmod 777`, menjalankan backend sebagai root, atau memberi sudo pada service account bukan solusi.
+Masalah permission harus diperbaiki secara sempit. `chmod 777`, menjalankan
+backend sebagai `root`, atau memberikan sudo kepada service account bukan
+solusi.
 
-## Network Boundary
+## Batas Jaringan
 
-Private-network policy hanya memberi normal member devices akses ke application port pada server-tagged device. Rule public berikut bersifat pola generik, bukan salinan konfigurasi operational:
+Kebijakan jaringan privat hanya memberi perangkat anggota biasa akses ke port
+aplikasi pada perangkat server yang memiliki tag. Rule publik berikut merupakan
+pola generik, bukan salinan konfigurasi operasional:
 
 ```json
 {
@@ -62,69 +73,86 @@ Private-network policy hanya memberi normal member devices akses ke application 
 }
 ```
 
-Firewall host tetap default-deny dan hanya menerima application port melalui private-network interface.
+Firewall host tetap default-deny dan hanya menerima port aplikasi melalui
+interface jaringan privat.
 
-## Control/Metadata Plane dan Content Plane
+## Alur Request
 
-File bytes berada pada content filesystem, bukan database BLOB. SQLite pada
-NVMe menyimpan users, opaque sessions, audit events, upload/trash operational
-state, dan metadata-only file index. Normal listing, metadata, search, trash
-listing, dan upload status hanya membaca SQLite: **metadata plane must not wake
-the data disk**.
+1. Client mengirim request HTTP melalui tailnet privat ke Go API.
+2. Backend mengurai input, memvalidasi session, menerapkan otorisasi owner,
+   lalu memvalidasi logical path sebelum mengakses storage.
+3. Operasi metadata normal membaca SQLite pada NVMe. HDD baru diakses untuk
+   membaca isi file atau melakukan mutasi filesystem.
+4. Perubahan state, metadata index, dan audit log diselesaikan melalui mekanisme
+   transaction, compensation, atau recovery sesuai jenis operasinya.
 
-HDD disentuh ketika byte atau mutasi memang diminta: upload chunk, download/
-Range, mkdir, move, trash, restore, recovery object yang sudah diketahui, dan
-explicit local-admin reindex. `files/`, `uploads/`, dan `trash/` wajib berada
-pada filesystem yang sama agar rename publication/trash/restore tetap atomic
-pada boundary filesystem. Partial upload tidak masuk file index sebelum
-publication.
+## Control Plane, Metadata Plane, dan Content Plane
 
-File API memakai logical path yang melalui parser dan `os.Root`; physical host
-path tidak diterima dari client dan tidak dikembalikan. Metadata index adalah
-derived state yang dapat dibangun ulang dengan generation switch. Reindex tidak
-berjalan otomatis saat startup atau browsing.
+Isi file disimpan pada filesystem di content plane, bukan sebagai BLOB
+database. SQLite pada NVMe menyimpan akun aplikasi SwaDrive, session aplikasi,
+audit event, state operasional upload dan trash, serta file index yang hanya
+berisi metadata.
+Listing normal, metadata, pencarian, listing trash, dan status upload hanya
+membaca SQLite: **metadata plane tidak boleh membangunkan data disk**.
 
-## Process dan Storage Ownership
+HDD diakses hanya ketika byte atau mutasi memang diminta: upload chunk,
+download dengan Range, mkdir, move, trash, restore, recovery atas objek yang
+sudah diketahui, dan reindex eksplisit oleh administrator lokal. `files/`,
+`uploads/`, dan `trash/` wajib berada pada filesystem yang sama agar rename
+untuk publikasi, trash, dan restore tetap atomik dalam batas filesystem. Upload
+parsial tidak masuk ke file index sebelum dipublikasikan.
 
-Server dan local admin command mengambil non-blocking flock berdasarkan
-canonical database path. Backend v1 mengasumsikan satu database dan satu storage
-root dimiliki satu process. Symlink alias database diuji; hard-link alias atau
-dua database berbeda menuju storage root yang sama tidak dijadikan model
-deployment yang didukung.
+File API memakai logical path yang melalui parser dan `os.Root`; physical path
+pada host tidak diterima dari client maupun dikembalikan kepadanya. Metadata
+index merupakan derived state yang dapat dibangun ulang dengan generation
+switch. Reindex tidak berjalan otomatis saat startup atau browsing.
+
+## Koordinasi Proses dan Identitas Storage
+
+Backend menggunakan process lock kanonis yang diturunkan dari path database.
+Server dan command administrasi lokal mengambil lock tersebut secara
+non-blocking. Backend `v1.0.0` mengasumsikan satu database dan satu storage root
+digunakan oleh satu proses. Alias database melalui symlink telah diuji; alias
+hard link atau dua database berbeda yang mengarah ke storage root yang sama
+bukan model deployment yang didukung.
 
 Flock tersebut mengoordinasikan proses SwaDrive yang bekerja sama. Ia bukan
-security boundary terhadap malicious same-UID process atau actor lain yang dapat
-mengganti file di state area yang writable untuk kebutuhan SQLite.
+batas keamanan terhadap proses berbahaya dengan UID yang sama atau pihak lain
+yang dapat mengganti file dalam area state yang harus dapat ditulis untuk
+kebutuhan SQLite.
 
 Storage root memiliki `.swadrive-volume` berisi
-`SWADRIVE_STORAGE_VOLUME_ID`. Marker yang salah/hilang/nonregular ditolak
-sebelum content directories diinisialisasi. Marker adalah application identity,
-bukan mount proof. Production memakai administrator-owned parent, mount
-verification/order melalui OS dan `systemd`, mounted storage root/marker yang
-tidak dapat diganti service, dan content subdirectories yang memang writable
-oleh service. Exact permission modes dan unit configuration bersifat
-deployment-specific dan tidak disimpan di source repository.
+`SWADRIVE_STORAGE_VOLUME_ID`. Marker dengan isi salah, hilang, atau bukan
+regular file ditolak sebelum subdirectory penyimpanan diinisialisasi. Marker
+merupakan identitas aplikasi, bukan bukti mount. Deployment production
+mensyaratkan parent directory milik administrator serta verifikasi dan urutan
+mount melalui OS dan `systemd`. Storage root yang ter-mount beserta marker tidak
+boleh dapat diganti service, sedangkan subdirectory penyimpanan memang dapat
+ditulis service. Mode permission dan
+konfigurasi unit yang tepat bergantung pada deployment dan tidak disimpan dalam
+source repository.
 
-## Failure Model
+## Model Kegagalan
 
-Filesystem dan SQLite tidak dapat menjadi satu transaction. Trash, restore, dan
-upload finalization menyimpan transitional state untuk targeted startup
-reconciliation. Mkdir/move menandai file index unhealthy secara durable sebelum
-filesystem mutation dan membersihkannya dalam transaction SQLite yang juga
-mengubah index/audit. Setelah intent committed, finalization memakai bounded
-internal repair context yang tidak dibatalkan hanya karena request client putus.
-Repair internal yang gagal tetap meninggalkan index unhealthy. Crash di tengah
-operasi membuat startup fail closed sampai explicit reindex, bukan memicu HDD
-scan. Upload part yang tercipta sebelum DB commit tidak dipublish; admin dapat
-menjalankan age/name/type-gated `reconcile-upload-parts` setelah meninjau dry-run.
+Filesystem dan SQLite tidak dapat berbagi satu transaction. Trash,
+restore, dan finalisasi upload menyimpan transitional state untuk targeted
+startup reconciliation. Mkdir dan move menandai file index sebagai unhealthy
+secara durable sebelum mutasi filesystem, lalu membersihkan tanda tersebut
+dalam transaction SQLite yang juga mengubah index dan audit log. Setelah intent
+di-commit, finalisasi menggunakan internal repair context yang terbatas dan
+tidak dibatalkan hanya karena request client terputus. Kegagalan repair
+internal tetap membiarkan index berstatus unhealthy. Crash di tengah operasi
+membuat startup fail-closed sampai reindex eksplisit dilakukan, bukan memicu
+HDD scan. Upload
+part yang dibuat sebelum DB commit tidak dipublikasikan; administrator dapat
+menjalankan `reconcile-upload-parts` dengan pembatasan umur, nama, dan tipe
+setelah meninjau dry-run.
 
-## Status Implementasi
+## Arsitektur Runtime dan Deployment
 
-Backend Go v1 menyediakan application auth, owner authorization, SQLite
-metadata index, logical-path file operations, trash/restore, streaming Range
-download, persistent fixed-chunk resumable upload, audit, local admin commands,
-resource gates, dan recovery yang dijelaskan di atas. Backend v1 menjadi
-production baseline `v1.0.0` pada 2026-08-26. Deployment menjalankan service
-pada Debian melalui `systemd`, memakai restricted runtime account, Tailscale
-private access, SQLite metadata pada NVMe, dan file content pada HDD. Flutter
-masih scaffold.
+Deployment production menjalankan satu proses backend pada Debian sebagai
+service `systemd` dengan runtime service account terbatas. Akses aplikasi hanya
+diterima melalui tailnet privat. SQLite dan state operasional berada pada NVMe,
+sedangkan isi file berada pada HDD. Detail versi yang telah dirilis tersedia
+dalam [catatan rilis `v1.0.0`](releases/v1.0.0.md); status client tersedia dalam
+[README](../README.md).

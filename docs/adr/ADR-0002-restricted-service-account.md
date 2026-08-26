@@ -1,48 +1,56 @@
-# ADR-0002: Run the Backend as a Dedicated Restricted Service Account
+# ADR-0002: Menjalankan Backend dengan Service Account Khusus yang Terbatas
 
-- **Status:** Accepted
-- **Scope:** Locked architecture
+- **Status:** Diterima
+- **Cakupan:** Arsitektur yang telah ditetapkan
 
-## Context
+## Konteks
 
-The backend will process user-controlled names, uploads, downloads, metadata,
-and filesystem operations. A backend compromise must not automatically grant
-root authority, human administrator authority, deployment authority, or broad
-filesystem access.
+Backend akan memproses nama yang dikendalikan pengguna, upload, download,
+metadata, dan operasi filesystem. Kompromi terhadap backend tidak boleh secara
+otomatis memberikan kewenangan `root`, kewenangan administrator,
+kewenangan deployment, atau akses filesystem yang luas.
 
-## Decision
+## Keputusan
 
-Run the Go backend as a dedicated restricted Linux service account, not as
-`root` or the human administrator account.
+Jalankan backend Go dengan service account khusus yang terbatas di Linux, bukan
+sebagai `root` atau akun administrator.
 
-The service account uses a non-interactive shell, has no sudo, interactive or
-SSH login, and has no Tailscale administration. It may write only the
-application storage, state, and log paths that require runtime mutation and may
-read administrator-provided configuration as needed.
+Service account menggunakan shell noninteraktif, tidak memiliki sudo, login
+interaktif atau SSH, maupun kewenangan administrasi Tailscale. Akun ini hanya
+boleh menulis path storage, state, dan log aplikasi yang memerlukan mutasi saat
+runtime, serta membaca konfigurasi yang disediakan administrator sesuai
+kebutuhan.
 
-The administrator chooses the state path, but the runtime account must be able
-to create and write SQLite's database, WAL, and SHM files there. The adjacent
-database flock coordinates cooperating SwaDrive processes; it is not a security
-boundary against a malicious process running with the same UID or another actor
-that can replace files in that writable state area.
+Administrator memilih path state, tetapi runtime service account harus dapat
+membuat dan menulis file database, WAL, dan SHM SQLite di sana. Flock di samping
+database mengoordinasikan proses SwaDrive yang bekerja sama; mekanisme ini
+bukan batas keamanan terhadap proses berbahaya yang berjalan dengan UID sama
+atau pihak lain yang dapat mengganti file dalam area state yang dapat ditulis
+tersebut.
 
-The mounted storage root and its `.swadrive-volume` marker remain
-administrator-controlled and must not be replaceable by the runtime account.
-The pre-provisioned `files/`, `uploads/`, and `trash/` content subdirectories are
-the service-writable data boundary. Exact production ownership, modes, mount
-ordering, and systemd writable-path rules are deployment responsibilities and
-must support these boundaries without granting broader access.
+Storage root yang ter-mount dan marker `.swadrive-volume` tetap dikendalikan
+administrator serta tidak boleh dapat diganti oleh runtime service account.
+Subdirectory penyimpanan `files/`, `uploads/`, dan `trash/` yang telah disediakan
+sebelumnya merupakan batas data yang dapat ditulis service. Ownership, mode,
+urutan mount, dan rule writable path `systemd` yang tepat di production menjadi
+tanggung jawab deployment serta harus mendukung batas ini tanpa memberikan
+akses yang lebih luas.
 
-The production binary remains administrator-owned under a release directory,
-and configuration remains administrator-controlled under a separate config
-directory. The runtime account must not be able to replace its own executable.
+Binary yang digunakan di production tetap dimiliki administrator dalam
+directory rilis, sedangkan konfigurasi tetap dikendalikan administrator dalam
+directory konfigurasi yang terpisah. Runtime service account tidak boleh dapat
+mengganti executable untuk backend.
 
-## Consequences
+## Konsekuensi
 
-- Backend compromise has a smaller Linux filesystem and privilege boundary.
-- Human administration, release installation, and application runtime remain
-  auditable as separate authorities.
-- Ownership and systemd writable-path rules require deliberate maintenance.
-- Permission failures must be fixed narrowly; `chmod 777`, sudo access, or
-  running the service as an administrator are not acceptable workarounds.
-- Additional systemd sandboxing can be added after the minimal service works.
+- Kompromi terhadap backend memiliki batas privilege dan filesystem Linux yang
+  lebih sempit.
+- Aktivitas administrator, instalasi rilis, dan runtime aplikasi tetap dapat
+  diaudit sebagai kewenangan yang terpisah.
+- Ownership dan rule writable path `systemd` memerlukan pemeliharaan yang
+  disengaja.
+- Kegagalan permission harus diperbaiki secara sempit; `chmod 777`, akses sudo,
+  atau menjalankan service sebagai administrator bukan workaround yang dapat
+  diterima.
+- Sandboxing `systemd` tambahan dapat diterapkan setelah service minimal
+  berfungsi.

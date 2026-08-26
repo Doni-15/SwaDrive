@@ -1,63 +1,71 @@
-# ADR-0006: Coordinate One Process and Verify Storage-Root Identity
+# ADR-0006: Mengoordinasikan Satu Proses dan Memverifikasi Identitas Storage Root
 
-- **Status:** Accepted
-- **Scope:** Backend v1 operational boundary
+- **Status:** Diterima
+- **Cakupan:** Batas operasional backend `v1.0.0`
 
-## Context
+## Konteks
 
-Backend v1 uses process-local mutation locks and resource gates while SQLite
-serializes writers. Running an unaware second server or local administrator
-command against the same database could bypass those process-local guarantees.
-Starting against an ordinary fallback directory when the intended content disk
-is absent could also place user bytes on the wrong filesystem.
+Backend `v1.0.0` memakai process-local mutation lock dan resource gate,
+sedangkan SQLite menserialisasi writer. Menjalankan server kedua yang tidak
+menyadari proses pertama atau command administrasi lokal terhadap database
+yang sama dapat melewati jaminan process-local tersebut. Menjalankan service
+pada fallback directory biasa ketika content disk yang dituju tidak tersedia
+juga dapat menempatkan byte pengguna pada filesystem yang salah.
 
-SQLite must be able to create its database, WAL, and SHM in the configured state
-area. A file lock beside that database can coordinate cooperating processes, but
-cannot defend against a hostile process with the same UID or another actor able
-to replace entries in the writable state directory.
+SQLite harus dapat membuat database, WAL, dan SHM dalam area state yang telah
+dikonfigurasi. File lock di samping database dapat mengoordinasikan proses yang
+bekerja sama, tetapi tidak dapat melindungi dari proses berbahaya dengan UID
+yang sama atau pihak lain yang dapat mengganti entry dalam state directory yang
+dapat ditulis.
 
-## Decision
+## Keputusan
 
-The server and local administrator commands take a nonblocking flock derived
-from the canonical database path. This excludes supported concurrent SwaDrive
-processes using the same database, including normal symlink aliases. Backend v1
-supports one process and one database/storage-root pair. Hard-link database
-aliases and distinct databases aimed at one storage root are unsupported.
+Server dan command administrasi lokal mengambil non-blocking flock yang
+diturunkan dari path database kanonis. Mekanisme ini mencegah beberapa proses
+SwaDrive yang didukung memakai database yang sama secara concurrent, termasuk
+melalui alias symlink normal. Backend `v1.0.0` mendukung satu proses dan satu
+pasangan database dan storage root. Alias database melalui hard link serta
+database berbeda yang diarahkan ke satu storage root tidak didukung.
 
-Before opening or initializing content subdirectories, the storage manager opens
-the configured root through `os.Root` and requires `.swadrive-volume` to be a
-bounded regular file whose value exactly matches `SWADRIVE_STORAGE_VOLUME_ID`.
-The marker is an application identity check, not proof that the intended HDD is
-mounted.
+Sebelum membuka atau menginisialisasi subdirectory penyimpanan, storage manager
+membuka root yang dikonfigurasi melalui `os.Root` dan mewajibkan
+`.swadrive-volume` berupa regular file berukuran terbatas dengan nilai yang sama
+persis dengan `SWADRIVE_STORAGE_VOLUME_ID`. Marker merupakan pemeriksaan
+identitas aplikasi, bukan bukti bahwa HDD yang dituju telah ter-mount.
 
-Production must keep the mounted storage root and marker administrator-
-controlled and not replaceable by the runtime service. The `files/`, `uploads/`,
-and `trash/` subdirectories are the service-writable content boundary. The state
-area must remain writable enough for SQLite database/WAL/SHM operation and its
-adjacent coordination lock. The flock is not a security boundary against a
-malicious same-UID writer. Exact ownership, permission modes, mount ordering,
-and systemd restrictions are deployment responsibilities and must be verified
-independently from source-level controls.
+Deployment production harus menjaga storage root yang ter-mount dan marker
+tetap dikendalikan administrator serta tidak dapat diganti oleh runtime service
+account. Subdirectory `files/`, `uploads/`, dan `trash/` merupakan content
+boundary yang dapat ditulis service. Area state harus tetap dapat ditulis
+secukupnya untuk operasi database/WAL/SHM SQLite dan coordination lock di
+sampingnya. Flock bukan batas keamanan terhadap writer berbahaya dengan UID
+yang sama. Ownership, mode permission, urutan mount, dan pembatasan `systemd`
+yang tepat merupakan tanggung jawab deployment. Batas tersebut harus
+diverifikasi secara independen dari kontrol pada level source.
 
-## Consequences
+## Konsekuensi
 
-- Cooperating server/admin processes fail fast instead of knowingly sharing one
-  database with independent in-process locks.
-- A wrong, missing, oversized, malformed, or nonregular volume marker prevents
-  storage initialization before content directories are created.
-- The marker detects ordinary configuration/fallback mistakes but cannot detect
-  every bind-mount or privileged filesystem substitution.
-- Administrator-controlled storage identity and service-writable content paths
-  require separate ownership boundaries at deployment.
-- A hostile root or same-UID process remains outside this coordination model;
-  OS ownership and service isolation must provide that security boundary.
+- Proses server dan command administrasi yang bekerja sama segera gagal,
+  alih-alih berbagi satu database sementara masing-masing memakai in-process
+  lock yang independen.
+- Marker volume yang salah, hilang, terlalu besar, malformed, atau bukan regular
+  file mencegah inisialisasi storage sebelum subdirectory tersebut dibuat.
+- Marker mendeteksi kesalahan konfigurasi atau fallback biasa, tetapi tidak
+  dapat mendeteksi setiap bind mount atau substitusi filesystem berprivilege.
+- Identitas storage yang dikendalikan administrator dan path penyimpanan yang
+  dapat ditulis service memerlukan batas ownership terpisah saat deployment.
+- `root` atau proses dengan UID yang sama dan bersifat berbahaya tetap berada
+  di luar model koordinasi ini; ownership OS dan isolasi service harus
+  menyediakan batas keamanan tersebut.
 
-## Alternatives Rejected
+## Alternatif yang Ditolak
 
-- **Treat the marker as mount proof:** rejected because a pathname and marker
-  cannot establish the complete kernel mount/ownership state.
-- **Treat flock as hostile-process isolation:** rejected because an actor able
-  to replace same-UID state files can bypass file-based coordination.
-- **Support multiple server processes in backend v1:** rejected because
-  process-local upload/file locks and SQLite writer behavior need a separate
-  shared-coordination design.
+- **Memperlakukan marker sebagai bukti mount:** ditolak karena pathname dan
+  marker tidak dapat menetapkan kondisi mount dan ownership kernel secara
+  lengkap.
+- **Memperlakukan flock sebagai isolasi proses berbahaya:** ditolak karena pihak
+  yang dapat mengganti state file milik UID yang sama dapat melewati koordinasi
+  berbasis file.
+- **Mendukung beberapa proses server pada backend `v1.0.0`:** ditolak karena
+  lock upload dan file process-local serta perilaku writer SQLite memerlukan
+  desain koordinasi bersama yang terpisah.

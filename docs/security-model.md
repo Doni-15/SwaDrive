@@ -1,74 +1,115 @@
-# Security Model SwaDrive
+# Model Keamanan SwaDrive
+
+Dokumen ini menjelaskan aset, trust boundary, identitas, kontrol keamanan, dan
+keterbatasan yang berlaku pada SwaDrive `v1.0.0`. Keputusan historis yang
+mendasarinya tetap dicatat dalam [ADR](adr/README.md).
 
 ## Aset yang Dilindungi
 
 - file pengguna dan metadata;
-- password hash dan session state;
+- hash password dan session state;
 - raw bearer session token pada client;
-- release artifact dan deployment configuration;
-- administrator access;
-- private-network control plane.
+- release artifact dan konfigurasi deployment;
+- akses administrator;
+- control plane untuk jaringan privat.
 
-## Trust Boundaries
+## Trust Boundary
 
 ```text
-client input
-    -> private network boundary
-    -> HTTP parsing and authentication
-    -> resource authorization
+input client
+    -> batas jaringan privat
+    -> parsing HTTP dan autentikasi
+    -> otorisasi resource
     -> filesystem containment
-    -> restricted Linux process
+    -> proses Linux terbatas
 ```
 
-Setiap boundary tetap diperlukan. Perangkat yang dapat mencapai server belum tentu berhak membaca resource.
+Setiap batas tetap diperlukan. Perangkat yang dapat mencapai server belum tentu
+berhak membaca resource.
 
-## Security Invariants
+## Identitas dan Kewenangan
 
-1. File API MUST implement application-level authentication and authorization before serving user data.
-2. Protected resource decisions memakai identity dari authentication middleware, bukan user ID dari request body.
-3. Logical path harus lolos parser dan semua physical operation tetap berada di bawah `os.Root` configured storage.
-4. Service process tidak boleh menulis binary, service unit, administrator configuration, atau home administrator.
-5. Raw password, token, file content, dan private host path tidak boleh dicatat pada log.
-6. Client tidak menerima OS credential atau private-network administration credential.
-7. Partial upload tidak terlihat sebagai file selesai.
-8. Normal list, metadata, search, trash listing, dan upload status tidak membaca HDD.
-9. Password hash hanya berada pada credential boundary auth; normal User/Identity tidak dapat membawanya.
-10. Marker volume adalah identity check, bukan bukti mount; production wajib memverifikasi mount dan ownership di OS.
-11. Process flock hanya mengoordinasikan proses SwaDrive yang bekerja sama; ia bukan isolasi terhadap hostile same-UID writer.
+- akun administrator mengelola OS, deployment, konfigurasi, dan recovery lokal;
+- identitas perangkat Tailscale hanya menentukan keterjangkauan jaringan;
+- akun aplikasi SwaDrive menentukan identitas dan hak atas resource aplikasi;
+- service account membatasi kewenangan proses backend pada host Linux.
 
-## Tested Backend-v1 Controls
+Keterjangkauan melalui Tailscale tidak memberikan hak aplikasi. Demikian pula,
+session aplikasi tidak memberikan akses OS atau kewenangan administrasi
+tailnet.
 
-- unauthenticated dan revoked session ditolak;
-- user A tidak dapat membaca/menulis resource user B;
+## Autentikasi, Otorisasi, dan Session
+
+Password akun aplikasi SwaDrive disimpan sebagai hash Argon2id. Login
+menghasilkan opaque bearer token acak 256-bit; server hanya menyimpan digest
+SHA-256 dari token tersebut. Setiap perangkat memiliki server-side session yang
+terpisah, dengan masa berlaku absolut 30 hari dan dapat dicabut secara
+independen.
+
+Middleware autentikasi membentuk identitas untuk request yang dilindungi.
+Keputusan otorisasi memakai identitas tersebut, bukan user ID dari request
+body. File API pada `v1.0.0` hanya tersedia bagi role owner. Health endpoint
+tidak memerlukan autentikasi aplikasi, tetapi tetap berada di balik batas
+jaringan privat.
+
+## Invariant Keamanan
+
+1. File API MUST menerapkan autentikasi dan otorisasi pada level aplikasi
+   sebelum menyajikan data pengguna.
+2. Keputusan atas resource yang dilindungi memakai identitas dari middleware
+   autentikasi, bukan user ID dari request body.
+3. Logical path harus lolos parser dan seluruh operasi fisik tetap berada di
+   bawah storage `os.Root` yang telah dikonfigurasi.
+4. Proses backend tidak boleh menulis binary, service unit, konfigurasi
+   administrator, atau home directory milik administrator.
+5. Raw password, token, isi file, dan physical path internal pada host tidak
+   boleh dicatat dalam log.
+6. Client tidak menerima credential OS atau credential administrasi jaringan
+   privat.
+7. Upload parsial tidak terlihat sebagai file selesai.
+8. Listing normal, metadata, pencarian, listing trash, dan status upload tidak
+   membaca HDD.
+9. Hash password hanya tersedia dalam credential boundary milik modul
+   autentikasi; model `User` dan `Identity` normal tidak dapat membawanya.
+10. Marker volume merupakan pemeriksaan identitas, bukan bukti mount;
+    production wajib memverifikasi mount dan ownership pada OS.
+11. Flock hanya mengoordinasikan proses SwaDrive yang bekerja sama;
+    mekanisme ini bukan isolasi terhadap writer berbahaya dengan UID yang sama.
+
+## Kontrol yang Telah Diuji
+
+- request tanpa autentikasi dan session yang telah dicabut ditolak;
+- pengguna A tidak dapat membaca atau menulis resource pengguna B;
 - absolute path, `..`, encoded traversal, null byte, dan symlink escape ditolak;
-- rename/move tidak dapat keluar dari storage root;
-- upload size limit dan free-space failure ditangani;
-- download/upload memakai bounded buffer;
-- log assertion memastikan token dan file content tidak tercatat.
-- account+IP login limiter, block-transition audit suppression, Argon2 admission,
-  dan login-only body deadline/admission;
-- generation-safe metadata reindex dan fail-closed unhealthy index;
-- parallel chunk integrity, finalizing startup recovery, dan orphan-part admin
-  reconciliation policy;
-- independent-process database lock dan volume-marker validation.
+- rename dan move tidak dapat keluar dari storage root;
+- batas ukuran upload dan kegagalan akibat ruang kosong ditangani;
+- download dan upload memakai buffer terbatas;
+- assertion pada log memastikan token dan isi file tidak tercatat;
+- login limiter berbasis akun+IP, pencegahan audit berulang saat transisi block,
+  Argon2 admission, serta deadline dan admission khusus body login;
+- metadata reindex dengan pergantian generation yang aman dan unhealthy index
+  yang fail-closed;
+- integritas chunk paralel, recovery saat startup untuk status `finalizing`,
+  dan kebijakan reconciliation orphan part oleh administrator;
+- database lock antarproses dan validasi marker volume.
 
-## Cryptography and Encryption Truth
+## Kriptografi, Transport, dan Encryption at Rest
 
-| Property | Backend v1 |
+| Properti | SwaDrive `v1.0.0` |
 | --- | --- |
-| Password storage | Argon2id one-way hash; bukan encryption |
-| Session DB storage | SHA-256 digest dari random 256-bit opaque token |
-| Raw bearer persistence | tidak disimpan server-side |
-| TLS di Go app | tidak ada |
-| Transport confidentiality | didelegasikan ke private Tailscale production boundary |
-| User-file application encryption at rest | tidak diimplementasikan |
-| SQLite application encryption at rest | tidak diimplementasikan |
+| Penyimpanan password | Hash satu arah Argon2id; bukan encryption |
+| Penyimpanan session di database | Digest SHA-256 dari opaque token acak 256-bit |
+| Persistensi raw bearer token | Tidak disimpan pada server |
+| TLS pada aplikasi Go | Tidak tersedia |
+| Kerahasiaan transport | Didelegasikan ke batas Tailscale privat di production |
+| Encryption at rest untuk file pada level aplikasi | Tidak diimplementasikan |
+| Encryption at rest SQLite pada level aplikasi | Tidak diimplementasikan |
 
-Physical-at-rest confidentiality adalah keputusan OS/storage terpisah, misalnya
-full-disk/filesystem encryption dan key lifecycle. Hashing tidak disebut
-encryption.
+Kerahasiaan data fisik saat disimpan merupakan keputusan OS dan storage yang
+terpisah, misalnya full-disk atau filesystem encryption beserta key lifecycle.
+Hashing bukan encryption.
 
-## Resource and Failure Limits
+## Batas Resource dan Model Kegagalan
 
 Argon2 (default 4), upload chunks (8), downloads (32), dan login requests (64)
 memiliki process-local concurrency gates. Login request body dibatasi 64 KiB dan
@@ -76,52 +117,67 @@ login-only read deadline 15 detik. Listing/search/audit pagination, upload count
 chunk count/size, DB pool, startup reconciliation, dan admin orphan scan juga
 dibatasi.
 
-Audit API tetap append-only. `login_rate_limited` ditulis hanya saat account/IP
-bucket melintasi threshold, bukan pada setiap request yang sudah diblokir.
-Threshold request tetap memiliki `login_failure`; block event memakai reason code
-yang hanya mengidentifikasi jenis bucket, bukan raw credential. Jika block audit
-gagal, limiter tetap blocked dan event tidak dicoba ulang pada setiap denial.
-Limiter memang process-local; restart memulai window baru.
+Audit API tetap append-only. `login_rate_limited` ditulis hanya ketika bucket
+akun/IP melintasi threshold, bukan pada setiap request yang sudah diblokir.
+Request yang mencapai threshold tetap memiliki `login_failure`; block event
+memakai reason code yang hanya mengidentifikasi jenis bucket, bukan raw
+credential. Jika audit untuk block gagal, limiter tetap memblokir dan event
+tidak dicoba ulang pada setiap penolakan. Limiter bersifat process-local;
+restart memulai window baru.
 
-Lifecycle policy backend v1 adalah:
+Kebijakan lifecycle backend `v1.0.0` adalah:
 
-- limiter entries expire in-process setelah block/window stale; tidak ada map
-  evidence baru di luar dua map yang masing-masing capped 10.000;
-- `login_rate_limited` hanya satu event per account/IP transition sehingga satu
-  block interval tidak menghasilkan audit rows sebanding dengan denial traffic;
-- expired/revoked session dan terminal upload history tetap disimpan oleh v1;
-- interrupted generation ditandai obsolete pada reindex berikutnya dan seluruh
-  obsolete rows dibersihkan batch 500 setelah successful generation switch;
-- audit events tetap append-only dan tidak dihapus otomatis.
+- entry pada limiter kedaluwarsa di dalam proses setelah block atau window tidak
+  lagi aktif; implementasi hanya memakai dua map yang masing-masing dibatasi
+  10.000 entry;
+- `login_rate_limited` hanya menghasilkan satu event per transisi akun/IP,
+  sehingga satu interval block tidak menghasilkan baris audit sebanding dengan
+  traffic penolakan;
+- session yang kedaluwarsa atau dicabut dan riwayat upload yang telah mencapai
+  status terminal tetap disimpan oleh `v1.0.0`;
+- generation yang terputus ditandai obsolete pada reindex berikutnya, lalu
+  seluruh baris obsolete dibersihkan dalam batch 500 setelah generation switch
+  berhasil;
+- audit event tetap append-only dan tidak dihapus secara otomatis.
 
-Dalam operasi production, database-size budget, alert 70%/85%, backup, dan
-offline archive schedule tetap menjadi tanggung jawab operator. Target policy
-yang masih harus direview adalah memindahkan terminal session/upload history
-yang lebih tua dari 90 hari dan audit lebih tua dari 365 hari ke
-administrator-controlled archive, dengan maintenance command/migration yang
-diuji terlebih dahulu. Retention tersebut belum diimplementasikan pada source
-v1 karena silent audit deletion akan mengubah semantik keamanan. Ini adalah
-production capacity limitation yang eksplisit, bukan klaim bahwa SQLite growth
-berhenti selamanya.
+Dalam operasi production, budget ukuran database, alert 70%/85%, backup, dan
+jadwal archive offline tetap menjadi tanggung jawab operator. Target kebijakan
+yang masih harus ditinjau adalah memindahkan ke archive yang dikendalikan
+administrator: riwayat session dan upload berstatus terminal yang lebih tua
+dari 90 hari, serta audit yang lebih tua dari 365 hari. Pemindahan akan memakai
+maintenance command atau migration yang diuji terlebih dahulu. Retention
+tersebut belum diimplementasikan
+dalam source code `v1.0.0` karena penghapusan audit secara diam-diam akan
+mengubah semantik keamanan. Ini merupakan keterbatasan kapasitas production yang
+eksplisit, bukan klaim bahwa pertumbuhan SQLite berhenti selamanya.
 
-Filesystem+SQLite tidak diklaim atomic. Known trash/upload states direconcile
-secara targeted. Durable unhealthy intent membuat crash mkdir/move fail closed
-sampai explicit reindex. Setelah intent committed, request cancellation tidak
-menjadi satu-satunya lifetime untuk index/audit finalization atau compensation
-cleanup: bounded internal repair context menyelesaikannya, sementara kegagalan
-repair tetap fail closed. Admin orphan-part cleanup hanya memeriksa internal
-uploads directory, membatasi scan, memerlukan age minimum, strict random `.part`
-name, regular file, DB absence, dan explicit `-apply`; ia tidak pernah publish.
+Filesystem dan SQLite tidak diklaim atomik. State trash dan upload yang telah
+diketahui ditangani melalui targeted reconciliation. Durable unhealthy intent
+membuat crash pada mkdir atau move menjadi fail-closed sampai reindex eksplisit
+dilakukan. Setelah intent di-commit, pembatalan request bukan satu-satunya
+lifetime untuk finalisasi index dan audit log atau compensation cleanup:
+internal repair context yang terbatas menyelesaikannya, sedangkan kegagalan
+repair tetap fail-closed. Cleanup orphan part oleh administrator hanya memeriksa
+directory `uploads/` yang bersifat internal, menggunakan scan terbatas, serta
+mensyaratkan umur minimum, nama `.part` acak yang ketat, regular file, ketiadaan
+entry database, dan opsi `-apply` eksplisit; operasi ini tidak pernah
+memublikasikan file.
 
-## Current Limits
+## Keterbatasan yang Diketahui
 
-Backend v1 masih owner-only dan satu process per database/storage root. Ia tidak
-menahan malicious root/same-UID writer, bind mount berbahaya, hard-link DB alias,
-atau dua DB berbeda menuju satu root. State area harus writable untuk SQLite
-DB/WAL/SHM dan coordination lock, sehingga flock bukan security boundary terhadap
-hostile same-UID writer. Mounted storage root dan marker harus administrator-
-controlled, sedangkan `files/`, `uploads/`, dan `trash/` adalah service-writable
-boundary. Exact ownership modes dan `systemd` unit configuration bersifat
-deployment-specific dan tidak dipublikasikan dalam repository. Content
-search/OCR/thumbnails dan application encryption at rest tidak ada. Backend v1
-menjadi production baseline `v1.0.0` pada 2026-08-26; Flutter tetap scaffold.
+API file, upload, dan audit pada `v1.0.0` masih hanya tersedia untuk owner, serta
+hanya mendukung satu proses per pasangan database dan storage root. Backend
+tidak melindungi dari `root` berbahaya, writer dengan UID yang sama, bind mount
+berbahaya, alias database melalui hard link, atau dua database berbeda yang
+mengarah ke satu root.
+
+Area state harus dapat ditulis untuk file SQLite DB/WAL/SHM dan coordination
+lock. Karena itu, flock bukan batas keamanan terhadap writer berbahaya dengan
+UID yang sama. Storage root yang ter-mount dan marker harus dikendalikan
+administrator, sedangkan `files/`, `uploads/`, dan `trash/` merupakan batas yang
+dapat ditulis service. Mode ownership yang tepat dan konfigurasi unit `systemd`
+bergantung pada deployment dan tidak dipublikasikan dalam repository.
+
+Content search, OCR, thumbnail, dan encryption at rest pada level aplikasi tidak
+tersedia. Backend menjadi baseline production `v1.0.0` pada 2026-08-26; client
+Flutter tetap berupa scaffold.

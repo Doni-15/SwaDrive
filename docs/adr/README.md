@@ -1,36 +1,38 @@
 # Architecture Decision Records
 
-This directory contains durable decisions that explain why SwaDrive's locked
-architecture exists. Current project state and future implementation plans live
-in the root [README](../../README.md).
+Folder ini memuat keputusan jangka panjang yang menjelaskan alasan di balik
+arsitektur SwaDrive yang telah ditetapkan. Status proyek saat ini dan rencana
+implementasi mendatang tersedia dalam [README](../../README.md) utama.
 
-## Accepted Decisions
+## Keputusan yang Diterima
 
-- [ADR-0001](ADR-0001-tailscale-plus-go-api.md): Tailscale provides private
-  network access; the Go HTTP API carries application data; SSH is
-  administration-only.
-- [ADR-0002](ADR-0002-restricted-service-account.md): the backend runs as a
-  dedicated restricted service account.
-
-- [ADR-0003](ADR-0003-application-authentication-and-sessions.md): application
-  authentication remains separate from Tailscale and uses Argon2id passwords
-  with opaque, independently revocable server-side sessions.
-- [ADR-0004](ADR-0004-persistent-fixed-chunk-resumable-uploads.md): uploads use
-  persistent fixed-size chunks with verified writes and atomic publication.
+- [ADR-0001](ADR-0001-tailscale-plus-go-api.md): Tailscale menyediakan akses
+  jaringan privat, Go HTTP API membawa data aplikasi, dan SSH hanya digunakan
+  untuk administrasi.
+- [ADR-0002](ADR-0002-restricted-service-account.md): backend berjalan dengan
+  service account khusus yang terbatas.
+- [ADR-0003](ADR-0003-application-authentication-and-sessions.md): autentikasi
+  aplikasi tetap terpisah dari Tailscale dan memakai password Argon2id dengan
+  server-side session berbasis opaque token yang dapat dicabut secara
+  independen.
+- [ADR-0004](ADR-0004-persistent-fixed-chunk-resumable-uploads.md): upload
+  memakai fixed chunk persisten, penulisan yang diverifikasi, dan publikasi
+  atomik.
 - [ADR-0005](ADR-0005-nvme-metadata-plane-and-hdd-content-plane.md): SQLite
-  serves the metadata plane while user content remains on the data filesystem
-  and known mutation gaps fail closed through durable state.
-- [ADR-0006](ADR-0006-process-coordination-and-storage-identity.md): cooperating
-  processes coordinate through the canonical database lock and bind operations
-  to an administrator-provisioned storage identity.
+  melayani metadata plane, isi file pengguna tetap berada pada data filesystem,
+  dan celah mutasi yang diketahui ditangani secara fail-closed melalui durable
+  state.
+- [ADR-0006](ADR-0006-process-coordination-and-storage-identity.md): proses yang
+  bekerja sama berkoordinasi melalui lock database kanonis dan mengikat operasi
+  pada identitas storage yang disediakan administrator.
 
-New ADRs should include status, context, decision, and consequences. A changed
-decision should supersede an earlier ADR rather than silently rewriting its
-history.
+ADR baru harus memuat status, konteks, keputusan, dan konsekuensi. Perubahan
+keputusan harus menggantikan ADR sebelumnya secara eksplisit, bukan menulis
+ulang riwayatnya secara diam-diam.
 
-Implementation-status and correctness clarifications may update an accepted ADR
-without changing its decision. The Phase 2/2.1 additions to ADR-0001 through
-ADR-0005 document implemented behavior and refine consequences consistent with
-those accepted boundaries. The distinct process-coordination and storage-
-identity decision is recorded separately as ADR-0006 rather than being silently
-folded into an earlier decision.
+Klarifikasi status implementasi dan correctness dapat memperbarui ADR yang
+telah diterima tanpa mengubah keputusannya. Penambahan Phase 2/2.1 pada ADR-0001
+sampai ADR-0005 mendokumentasikan perilaku yang telah diimplementasikan dan
+memperjelas konsekuensi sesuai batas yang diterima. Keputusan khusus mengenai
+koordinasi proses dan identitas storage dicatat terpisah sebagai ADR-0006,
+bukan disisipkan secara diam-diam ke dalam ADR sebelumnya.

@@ -1,115 +1,122 @@
-# ADR-0003: Use Application Authentication with Opaque Server-Side Sessions
+# ADR-0003: Menggunakan Autentikasi Aplikasi dengan Opaque Server-Side Session
 
-- **Status:** Accepted
-- **Scope:** Locked architecture
+- **Status:** Diterima
+- **Cakupan:** Arsitektur yang telah ditetapkan
 
-## Context
+## Konteks
 
-Tailscale determines which devices may reach SwaDrive's private network
-service, but network reachability does not establish an application user or
-provide application-level authorization. SwaDrive also needs multiple device
-sessions that can expire and be revoked independently without exposing a
-reusable credential in persistent storage.
+Tailscale menentukan perangkat yang dapat mencapai service jaringan privat
+SwaDrive, tetapi keterjangkauan jaringan tidak menetapkan akun aplikasi maupun
+memberikan otorisasi pada level aplikasi. SwaDrive juga memerlukan beberapa
+session perangkat yang dapat kedaluwarsa dan dicabut secara independen tanpa
+mengekspos credential yang dapat digunakan ulang dalam persistent storage.
 
-Passwords and session credentials are security-sensitive. Their formats must
-support safe verification and future parameter upgrades without requiring a
-JWT signing-key lifecycle or refresh-token system during the initial product
-phase.
+Password dan credential session bersifat sensitif terhadap keamanan. Formatnya
+harus mendukung verifikasi yang aman dan upgrade parameter di masa mendatang
+tanpa memerlukan siklus hidup signing key JWT atau sistem refresh token pada
+fase awal produk.
 
-## Decision
+## Keputusan
 
-Go provides application authentication and authorization independently from
-Tailscale. Application users are stored in SQLite. There is no public
-self-registration endpoint initially. Initial owner creation is implemented by
-the local administrator-controlled `bootstrap-owner` command; whether an owner
-has actually been provisioned in production remains deployment state. The data
-model continues to support additional users.
+Go menyediakan autentikasi dan otorisasi aplikasi secara independen dari
+Tailscale. Akun aplikasi SwaDrive disimpan dalam SQLite. Pada tahap awal tidak
+ada endpoint self-registration publik. Pembuatan owner awal diimplementasikan
+melalui command `bootstrap-owner` yang dikendalikan administrator lokal; apakah
+owner benar-benar telah disediakan di production tetap merupakan state
+deployment. Model data tetap mendukung penambahan pengguna.
 
-Passwords are hashed with Argon2id and stored in a self-describing encoded
-format containing the algorithm version, parameters, salt, and derived hash.
-Password-hashing parameters and verification are centralized so new hashes can
-use upgraded parameters while existing hashes remain verifiable.
-All Argon2id work passes through one injected, context-aware process-local gate
-(four concurrent operations by default) so an authentication flood cannot
-multiply the 64 MiB derivation memory without bound. Owner bootstrap uses the
-same gate. Password hashes exist only in an unexported auth credential type;
-normal user and authenticated identity models cannot carry credential data.
+Password di-hash dengan Argon2id dan disimpan dalam format encoded
+self-describing yang memuat versi algoritma, parameter, salt, dan derived hash.
+Parameter serta verifikasi hashing password dipusatkan agar hash baru dapat
+memakai parameter yang ditingkatkan, sementara hash lama tetap dapat
+diverifikasi. Seluruh pekerjaan Argon2id melewati satu process-local gate
+berbasis context yang disediakan melalui dependency injection, dengan default
+empat operasi concurrent, agar banjir autentikasi tidak dapat melipatgandakan
+memori derivasi 64 MiB tanpa batas. Bootstrap owner memakai gate yang sama. Hash
+password hanya tersedia dalam tipe credential autentikasi yang tidak diekspor;
+model pengguna dan identitas terautentikasi normal tidak dapat membawa data
+credential.
 
-Authentication uses opaque server-side sessions rather than JWTs. Each login
-generates a cryptographically random 256-bit token with `crypto/rand`. The raw,
-unpadded URL-safe base64 token is returned only to the client and is never
-logged. SQLite stores only `SHA-256(raw token)`. A protected request presents
-the credential as `Authorization: Bearer <opaque-token>`.
+Autentikasi memakai opaque server-side session, bukan JWT. Setiap login
+menghasilkan token acak kriptografis 256-bit dengan `crypto/rand`. Token mentah
+dalam base64 URL-safe tanpa padding hanya dikembalikan kepada client dan tidak
+pernah dicatat dalam log. SQLite hanya menyimpan `SHA-256(raw token)`. Request
+yang dilindungi mengirim credential sebagai
+`Authorization: Bearer <opaque-token>`.
 
-Each login/device has its own session row. Sessions have an absolute initial
-expiration of 30 days and may be revoked independently. Logout revokes only the
-current session; the session-management endpoint may revoke another device
-without revoking every session belonging to the user. Initial authentication
-does not use refresh tokens or sliding expiration.
+Setiap login atau perangkat memiliki baris session sendiri. Session memiliki
+masa berlaku awal absolut selama 30 hari dan dapat dicabut secara independen.
+Logout hanya mencabut session saat ini; endpoint pengelolaan session dapat
+mencabut session perangkat lain tanpa mencabut semua session milik pengguna.
+Autentikasi awal tidak memakai refresh token atau sliding expiration.
 
-Protected requests validate that the session exists, is not
-revoked or expired, and belongs to an existing, enabled user. Authentication
-success and failure, logout, session revocation, and other security-sensitive
-account events are audited without recording passwords, password hashes,
-or raw session tokens.
+Request yang dilindungi memvalidasi bahwa session tersedia, belum dicabut atau
+kedaluwarsa, dan dimiliki oleh pengguna aktif yang masih ada. Keberhasilan dan
+kegagalan autentikasi, logout, pencabutan session, serta event akun sensitif
+lainnya diaudit tanpa mencatat password, hash password, atau raw session token.
 
-When security state and audit share SQLite, initial-owner creation, successful
-session creation, logout, and session revocation append their audit row in the
-same explicit transaction as the state change. Either both commit or neither
-does. Login failure limiting remains process-local and uses a bounded
-username+peer bucket plus a looser peer-wide username-spray bucket.
+Ketika state keamanan dan audit memakai SQLite yang sama, pembuatan owner awal,
+pembuatan session yang berhasil, logout, dan pencabutan session menambahkan
+baris audit dalam transaction eksplisit yang sama dengan perubahan state.
+Keduanya di-commit bersama atau tidak sama sekali. Pembatasan kegagalan login
+tetap process-local dan memakai bucket username+peer yang terbatas serta bucket
+username spray peer-wide yang lebih longgar.
 
-The username+peer policy blocks after 8 failures in 5 minutes and the peer-wide
-spray policy after 40; each block lasts 15 minutes. A request that crosses a
-threshold records its ordinary `login_failure` and one
-`login_rate_limited` transition event identifying only the bucket kind. Requests
-rejected by an already-blocked bucket perform no Argon2 work and append no audit
-row. Concurrent transitions are suppressed by the limiter mutex. If transition
-audit persistence fails, login still does not succeed, the process-local bucket
-remains blocked, and later denials do not retry the write without bound. Restart
-intentionally begins new process-local limiter windows.
+Kebijakan username+peer memblokir setelah 8 kegagalan dalam 5 menit, sedangkan
+kebijakan spray peer-wide memblokir setelah 40 kegagalan; setiap block berlaku
+selama 15 menit. Request yang melewati threshold mencatat `login_failure` biasa
+dan satu transition event `login_rate_limited` yang hanya mengidentifikasi jenis
+bucket. Request yang ditolak oleh bucket yang sudah diblokir tidak melakukan
+pekerjaan Argon2 dan tidak menambahkan baris audit. Transisi concurrent dicegah
+oleh mutex limiter. Jika persistensi audit transisi gagal, login tetap tidak
+berhasil, bucket process-local tetap diblokir, dan penolakan berikutnya tidak
+mencoba ulang penulisan tanpa batas. Restart secara sengaja memulai window
+limiter process-local yang baru.
 
-The public login handler admits at most 64 concurrent requests and installs a
-15-second body-read deadline before reading its bounded 64 KiB JSON body. These
-route-specific controls do not impose global timeouts on streaming transfers.
+Handler login publik menerima paling banyak 64 request concurrent dan
+menetapkan deadline pembacaan body selama 15 detik sebelum membaca body JSON
+yang dibatasi 64 KiB. Kontrol khusus route ini tidak menetapkan timeout global
+pada transfer streaming.
 
-`GET /api/v1/health` remains unauthenticated at the application layer. Its
-network reachability remains restricted by the private Tailscale boundary.
+`GET /api/v1/health` tetap tidak memerlukan autentikasi pada level aplikasi.
+Keterjangkauan jaringannya tetap dibatasi oleh batas Tailscale privat.
 
-## Consequences
+## Konsekuensi
 
-- Compromise of Tailscale device reachability alone does not grant application
-  identity or permissions.
-- A database disclosure does not directly reveal plaintext passwords or bearer
-  session tokens, although password hashes and session metadata remain
-  security-sensitive.
-- Lost or untrusted devices can be revoked independently, and one user may use
-  multiple devices concurrently.
-- The server must perform a database lookup for protected requests and enforce
-  expiry, revocation, disabled-user, and authorization rules.
-- Argon2 concurrency is bounded per process, so multi-process deployment would
-  require a separate shared resource-control design.
-- Clients must protect the raw token in platform-appropriate secure storage.
-- Initial session behavior stays small and predictable, at the cost of
-  requiring a new login after absolute expiration.
-- Append-only auth history still needs production capacity monitoring and an
-  explicit retention/archive policy; the application does not silently mutate
-  or prune audit rows.
+- Kompromi terhadap keterjangkauan perangkat Tailscale saja tidak memberikan
+  identitas atau permission aplikasi.
+- Pengungkapan database tidak langsung memperlihatkan plaintext password atau
+  bearer session token, meskipun hash password dan metadata session tetap
+  sensitif terhadap keamanan.
+- Perangkat yang hilang atau tidak lagi dipercaya dapat dicabut secara
+  independen, dan satu pengguna dapat memakai beberapa perangkat secara
+  concurrent.
+- Server harus melakukan lookup ke database untuk request yang dilindungi dan
+  menerapkan rule masa berlaku, pencabutan, pengguna nonaktif, serta otorisasi.
+- Concurrency Argon2 dibatasi per proses, sehingga deployment dengan beberapa
+  proses memerlukan desain kontrol resource bersama yang terpisah.
+- Client harus melindungi raw token dalam secure storage yang sesuai dengan
+  platform.
+- Perilaku session awal tetap sederhana dan dapat diprediksi, dengan konsekuensi
+  login baru diperlukan setelah masa berlaku absolut berakhir.
+- Riwayat autentikasi append-only tetap memerlukan pemantauan kapasitas
+  production dan kebijakan retention atau archive yang eksplisit; aplikasi
+  tidak mengubah atau memangkas baris audit secara diam-diam.
 
-## Alternatives Rejected
+## Alternatif yang Ditolak
 
-- **Treat Tailscale identity as application authentication:** rejected because
-  network/device authorization and application-user authorization are distinct
-  security boundaries.
-- **JWT access tokens:** rejected because immediate per-device revocation still
-  requires server-side state and introduces signing-key and claim-lifecycle
-  complexity without an initial benefit.
-- **Store raw session tokens:** rejected because a database disclosure would
-  immediately expose live bearer credentials.
-- **Use one shared or global session:** rejected because revoking one device
-  would unnecessarily sign out every device.
-- **Refresh tokens or sliding expiration:** rejected for the initial phase as
-  avoidable session-lifecycle complexity.
-- **Public self-registration:** rejected because the initial private deployment
-  uses administrator-controlled owner bootstrap and does not need an open
-  account-creation surface.
+- **Memperlakukan identitas Tailscale sebagai autentikasi aplikasi:** ditolak
+  karena otorisasi jaringan atau perangkat dan otorisasi akun aplikasi
+  merupakan batas keamanan yang berbeda.
+- **JWT access token:** ditolak karena pencabutan langsung per perangkat tetap
+  memerlukan server-side state dan menambah kompleksitas signing key serta
+  claim lifecycle tanpa manfaat awal.
+- **Menyimpan raw session token:** ditolak karena pengungkapan database akan
+  langsung mengekspos bearer credential yang masih aktif.
+- **Memakai satu session bersama atau global:** ditolak karena pencabutan satu
+  perangkat akan menyebabkan semua perangkat logout tanpa kebutuhan.
+- **Refresh token atau sliding expiration:** ditolak pada fase awal karena
+  menambah kompleksitas session lifecycle yang dapat dihindari.
+- **Self-registration publik:** ditolak karena deployment privat awal memakai
+  bootstrap owner yang dikendalikan administrator dan tidak memerlukan
+  permukaan pembuatan akun yang terbuka.

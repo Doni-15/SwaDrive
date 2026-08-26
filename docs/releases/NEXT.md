@@ -1,49 +1,51 @@
-# SwaDrive — Next Release
+# SwaDrive — Rilis Berikutnya
 
-Current stable: `v1.0.0`
+Rilis stabil saat ini: `v1.0.0`
 
-Next major target: `v2.0.0`
+Target major berikutnya: `v2.0.0`
 
-Status: **PLANNED / DEVELOPMENT TARGET**
+Status: **DIRENCANAKAN / TARGET PENGEMBANGAN**
 
 `v2.0.0` belum dirilis. Seluruh entri dalam dokumen ini adalah catatan
-perencanaan dan tidak menjadi fitur yang dijanjikan sampai implementasinya
-selesai, diuji, diverifikasi terhadap source, dan dicatat dalam release notes.
+perencanaan dan bukan fitur yang dijanjikan sampai implementasinya selesai,
+diuji, diverifikasi terhadap source, dan dicatat dalam catatan rilis.
 
 ## Target
 
-Target major development berikutnya adalah `v2.0.0`. Stable production baseline
-tetap `v1.0.0` sampai release baru secara resmi dinyatakan siap.
+Target major berikutnya adalah `v2.0.0`. Baseline production stabil tetap
+`v1.0.0` sampai rilis baru secara resmi dinyatakan siap.
 
-## Planning Rules
+## Aturan Perencanaan
 
-- Tambahkan scope hanya setelah keputusan implementasi disetujui.
-- Bedakan candidate, confirmed work, completed work, dan deferred work.
+- Tambahkan cakupan hanya setelah keputusan implementasi disetujui.
+- Bedakan kandidat, pekerjaan yang dikonfirmasi, pekerjaan yang selesai, dan
+  pekerjaan yang ditunda.
 - Jangan mencatat ide atau prototype sebagai fitur selesai.
-- Setiap klaim completed harus memiliki bukti pada implementation, tests,
-  migrations, atau dokumentasi keputusan yang berlaku.
-- Perubahan security/storage boundary memerlukan review dan dokumentasi yang
+- Setiap klaim selesai harus memiliki bukti dalam implementasi, test, migration,
+  atau dokumentasi keputusan yang berlaku.
+- Perubahan batas keamanan atau storage memerlukan review dan dokumentasi yang
   sesuai.
 
-## Candidate Scope
+## Kandidat Cakupan
 
-Feature scope akan ditambahkan setelah implementation decisions disetujui.
-Belum ada candidate scope yang menjadi komitmen rilis.
+Cakupan fitur akan ditambahkan setelah keputusan implementasi disetujui. Belum
+ada kandidat cakupan yang menjadi komitmen rilis.
 
-## Confirmed Work
+## Pekerjaan yang Dikonfirmasi
 
 Belum ada work item `v2.0.0` yang dikonfirmasi dalam dokumen ini.
 
-## Completed for v2
+## Selesai untuk v2.0.0
 
 Belum ada fitur yang dinyatakan selesai untuk `v2.0.0`.
 
-## Deferred
+## Ditunda
 
-Belum ada item yang secara resmi dipindahkan ke kategori deferred.
+Belum ada item yang secara resmi dipindahkan ke kategori ini.
 
-## Release Readiness
+## Kesiapan Rilis
 
-`v2.0.0` belum siap dirilis. Readiness baru dapat dinyatakan setelah scope
-disetujui, implementation dan tests selesai, security/deployment impact
-ditinjau, dokumentasi diselaraskan, dan release provenance ditetapkan.
+`v2.0.0` belum siap dirilis. Kesiapan baru dapat dinyatakan setelah cakupan
+disetujui, implementasi dan test selesai, dampak terhadap keamanan dan
+deployment ditinjau, dokumentasi diselaraskan, serta provenance rilis
+ditetapkan.
