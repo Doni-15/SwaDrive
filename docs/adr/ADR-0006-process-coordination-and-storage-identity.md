@@ -36,8 +36,8 @@ and `trash/` subdirectories are the service-writable content boundary. The state
 area must remain writable enough for SQLite database/WAL/SHM operation and its
 adjacent coordination lock. The flock is not a security boundary against a
 malicious same-UID writer. Exact ownership, permission modes, mount ordering,
-and systemd restrictions are deferred to the deployment phase and must be
-verified there.
+and systemd restrictions are deployment responsibilities and must be verified
+independently from source-level controls.
 
 ## Consequences
 

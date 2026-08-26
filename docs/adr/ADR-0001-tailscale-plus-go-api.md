@@ -36,8 +36,8 @@ evaluated later without changing the boundary between private network access
 and application authorization.
 
 Backend v1 does not terminate TLS in the Go process. Transport confidentiality
-therefore depends on the later deployment actually using and verifying the
-intended Tailscale path and ACLs. This is not an application-level encryption
+therefore depends on production actually using and verifying the intended
+Tailscale path and ACLs. This is not an application-level encryption
 claim and does not provide encryption at rest for files or SQLite.
 
 ## Consequences

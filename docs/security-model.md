@@ -60,7 +60,7 @@ Setiap boundary tetap diperlukan. Perangkat yang dapat mencapai server belum ten
 | Session DB storage | SHA-256 digest dari random 256-bit opaque token |
 | Raw bearer persistence | tidak disimpan server-side |
 | TLS di Go app | tidak ada |
-| Transport confidentiality | didelegasikan ke Tailscale deployment yang harus diverifikasi kemudian |
+| Transport confidentiality | didelegasikan ke private Tailscale production boundary |
 | User-file application encryption at rest | tidak diimplementasikan |
 | SQLite application encryption at rest | tidak diimplementasikan |
 
@@ -94,14 +94,15 @@ Lifecycle policy backend v1 adalah:
   obsolete rows dibersihkan batch 500 setelah successful generation switch;
 - audit events tetap append-only dan tidak dihapus otomatis.
 
-Sebelum production, operator harus menetapkan database-size budget, alert 70%/
-85%, backup, dan offline archive schedule. Target policy yang harus direview
-adalah memindahkan terminal session/upload history yang lebih tua dari 90 hari
-dan audit lebih tua dari 365 hari ke administrator-controlled archive, dengan
-maintenance command/migration yang diuji terlebih dahulu. Retention tersebut
-belum diimplementasikan pada source v1 karena silent audit deletion akan mengubah
-semantik keamanan. Ini adalah production capacity limitation yang eksplisit,
-bukan klaim bahwa SQLite growth berhenti selamanya.
+Dalam operasi production, database-size budget, alert 70%/85%, backup, dan
+offline archive schedule tetap menjadi tanggung jawab operator. Target policy
+yang masih harus direview adalah memindahkan terminal session/upload history
+yang lebih tua dari 90 hari dan audit lebih tua dari 365 hari ke
+administrator-controlled archive, dengan maintenance command/migration yang
+diuji terlebih dahulu. Retention tersebut belum diimplementasikan pada source
+v1 karena silent audit deletion akan mengubah semantik keamanan. Ini adalah
+production capacity limitation yang eksplisit, bukan klaim bahwa SQLite growth
+berhenti selamanya.
 
 Filesystem+SQLite tidak diklaim atomic. Known trash/upload states direconcile
 secara targeted. Durable unhealthy intent membuat crash mkdir/move fail closed
@@ -120,6 +121,7 @@ atau dua DB berbeda menuju satu root. State area harus writable untuk SQLite
 DB/WAL/SHM dan coordination lock, sehingga flock bukan security boundary terhadap
 hostile same-UID writer. Mounted storage root dan marker harus administrator-
 controlled, sedangkan `files/`, `uploads/`, dan `trash/` adalah service-writable
-boundary. Exact ownership/mode/systemd policy belum dipilih atau diverifikasi.
-Content search/OCR/thumbnails dan application encryption at rest tidak ada.
-Production belum diverifikasi atau dideploy oleh source phase ini.
+boundary. Exact ownership modes dan `systemd` unit configuration bersifat
+deployment-specific dan tidak dipublikasikan dalam repository. Content
+search/OCR/thumbnails dan application encryption at rest tidak ada. Backend v1
+menjadi production baseline `v1.0.0` pada 2026-08-26; Flutter tetap scaffold.

@@ -99,11 +99,11 @@ mengganti file di state area yang writable untuk kebutuhan SQLite.
 Storage root memiliki `.swadrive-volume` berisi
 `SWADRIVE_STORAGE_VOLUME_ID`. Marker yang salah/hilang/nonregular ditolak
 sebelum content directories diinisialisasi. Marker adalah application identity,
-bukan mount proof. Production masih harus memakai administrator-owned parent,
-mount verification/order (misalnya systemd), mounted storage root/marker yang
+bukan mount proof. Production memakai administrator-owned parent, mount
+verification/order melalui OS dan `systemd`, mounted storage root/marker yang
 tidak dapat diganti service, dan content subdirectories yang memang writable
-oleh service. Exact ownership/mode/systemd design harus dipilih dan diverifikasi
-pada deployment; source belum menetapkan layout permission final.
+oleh service. Exact permission modes dan unit configuration bersifat
+deployment-specific dan tidak disimpan di source repository.
 
 ## Failure Model
 
@@ -123,6 +123,8 @@ menjalankan age/name/type-gated `reconcile-upload-parts` setelah meninjau dry-ru
 Backend Go v1 menyediakan application auth, owner authorization, SQLite
 metadata index, logical-path file operations, trash/restore, streaming Range
 download, persistent fixed-chunk resumable upload, audit, local admin commands,
-resource gates, dan recovery yang dijelaskan di atas. Flutter masih scaffold.
-Deployment production backend v1 belum dilakukan dan tetap memerlukan review
-OS/storage/Tailscale terpisah.
+resource gates, dan recovery yang dijelaskan di atas. Backend v1 menjadi
+production baseline `v1.0.0` pada 2026-08-26. Deployment menjalankan service
+pada Debian melalui `systemd`, memakai restricted runtime account, Tailscale
+private access, SQLite metadata pada NVMe, dan file content pada HDD. Flutter
+masih scaffold.

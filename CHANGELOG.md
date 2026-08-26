@@ -1,78 +1,68 @@
 # Changelog
 
-All notable SwaDrive project changes are recorded here. The project has not
-published a release yet.
+All notable SwaDrive project changes are recorded here.
 
-## Unreleased
+## [Unreleased]
 
-### Changed
+Next major target: `v2.0.0`.
 
-- Adopted the SwaDrive product identity while preserving the existing
-  `client/`, `server/`, Android package, Go module, and Git remote identities.
-- Consolidated project state, requirements, architecture, API and data-model
-  direction, workflows, testing, and roadmap into the root README.
-- Retained only durable architecture decisions under `docs/adr/`.
-- Synchronized the roadmap with verified infrastructure and network state:
-  Phases 0-3 complete, with Phase 4 and later phases not started.
-- Recorded the Android phone as a normal Tailscale Member device.
+No `v2.0.0` feature is recorded as completed. See the
+[`NEXT` release flag](docs/releases/NEXT.md) for planning status.
 
-### Backend v1 — local implementation and Phase 2 hardening
+## [1.0.0] - 2026-08-26
 
-- Added Argon2id application authentication, opaque independently revocable
-  sessions, owner authorization, and transactional auth/audit mutations.
-- Added bounded username+peer and peer-wide login limiting. A durable
-  `auth.login_rate_limited` event is now emitted only when a bucket crosses its
-  threshold; already-blocked requests do not append one SQLite row each.
-- Added logical-path file APIs backed by an NVMe SQLite metadata index for normal
-  listing, metadata, search, trash listing, and upload status.
-- Added generation-safe explicit reindex and incremental mkdir/move/trash/
-  restore/upload-completion index maintenance.
-- Added streaming Range downloads and persistent fixed-chunk resumable uploads
-  with parallel chunk integrity, bounded concurrency, atomic no-overwrite
-  publication, and startup finalizing reconciliation.
-- Added durable unhealthy index intent around mkdir/move filesystem mutations;
-  an interrupted operation fails startup closed until explicit reindex.
-- Added local-admin, bounded, age/name/type-gated orphan upload-part dry-run and
-  explicit cleanup.
-- Added a canonical database process lock, storage volume identity validation,
-  same-filesystem checks for `files/`, `uploads/`, and `trash/`, login-only body
-  deadline/admission, strict duplicate security-header rejection, safe startup
-  log categories, and a bounded cleanup-worker shutdown wait.
-- Detached mkdir/move consistency finalization from client cancellation with a
-  short bounded internal repair context; request disconnect alone no longer
-  strands a successfully finalized or compensated durable mutation intent.
-- Documented that `.swadrive-volume` is identity rather than mount proof;
-  production mount/ownership/Tailscale controls remain a later deployment phase.
-- Clarified that Argon2/SHA-256 are hashing controls. User files and SQLite are
-  not application-encrypted at rest, and the Go app does not terminate TLS.
+First production release. The canonical release description and artifact
+provenance are available in the [`v1.0.0` release notes](docs/releases/v1.0.0.md).
 
-### Phase 3 - Go Foundation (completed 2026-08-24)
+### Added
 
-- Added the minimal Go server entry point and automated health handler test for
-  `GET /api/v1/health`; the endpoint returns HTTP 200 with `{"status":"ok"}`.
-- Verified `go test ./...`, `go vet ./...`, and `go test -race ./...`.
-- Built a statically linked Linux amd64 production artifact with CGO disabled
-  from a clean VCS build state.
-- Installed an administrator-owned binary under a dedicated release directory
-  and deployed it as an enabled systemd service running as the restricted
-  service account.
-- Verified service restart and reboot persistence and health access through
-  MagicDNS and direct Tailscale IPv4, while direct Ethernet access to the
-  application port remains blocked.
+- Added the Go `/api/v1` backend with application authentication, owner
+  authorization, opaque independently revocable server-side sessions, and a
+  health endpoint.
+- Added owner-only logical-path APIs for file listing, metadata, search, folder
+  creation, move, trash, restore, and streaming HTTP Range downloads.
+- Added a rebuildable SQLite metadata index with generation-safe explicit
+  reindex and incremental maintenance for file mutations.
+- Added persistent fixed-chunk resumable uploads with per-chunk SHA-256,
+  optional whole-file verification, restart recovery, bounded concurrency, and
+  atomic no-overwrite publication.
+- Added append-only, owner-readable audit events for authentication, session,
+  file, and upload activity.
+- Added local `swadrive-admin` commands for initial owner bootstrap, metadata
+  reindex, and bounded orphan upload-part reconciliation with dry-run by
+  default.
 
-### Infrastructure Recorded
+### Security
 
-- Established the Debian 13 server baseline, separated human administration
-  from the restricted backend runtime identity, and created the production
-  filesystem layout with least-privilege ownership.
-- Rebuilt the Tailscale foundation around a tagged storage server, normal
-  Member clients, MagicDNS, and a narrowly scoped application-port grant.
-- Selected the Arch Linux workstation for all development and removed Go, Git,
-  and the temporary source workspace from production.
+- Added Argon2id password hashing and storage of only SHA-256 digests for
+  cryptographically random 256-bit opaque session tokens.
+- Added bounded authentication and transfer resource gates, login abuse
+  limiting, strict security-header handling, and redacted operational logging.
+- Added owner authorization plus logical-path containment that rejects absolute
+  paths, traversal, encoded traversal, null bytes, and symlink escape.
+- Added canonical database process locking, storage volume identity validation,
+  same-filesystem checks, targeted startup reconciliation, and fail-closed
+  metadata consistency handling.
+- Separated Tailscale network reachability, application identity, human Linux
+  administration, and the restricted runtime service identity.
 
-### Not Yet Implemented
+### Infrastructure
 
-- Flutter login/file-browser product features.
-- Production deployment and verification of backend v1 mount, ownership,
-  Tailscale, backup, monitoring, capacity/retention, and at-rest encryption
-  decisions.
+- Deployed the frozen backend v1 baseline to a Debian production server on
+  2026-08-26 as a `systemd`-managed service running under
+  `personalcloud_service`.
+- Restricted backend access to the Tailscale private network on TCP `8080`,
+  without public exposure of the application port.
+- Established an NVMe control/metadata plane for SQLite and an HDD content
+  plane rooted at `/srv/personalcloud` for files, uploads, and trash.
+- Configured SwaDrive to fail closed when the production storage mount is
+  unavailable while allowing Debian itself to boot without the HDD.
+
+### Known Limitations
+
+- The Flutter Android/Linux project remains a minimal scaffold without login,
+  file-browser, or transfer UX.
+- Backend v1 file, upload, and audit APIs are owner-only and support one server
+  process per database/storage-root pair.
+- Application-level encryption at rest, public sharing, content indexing,
+  thumbnails, OCR, and automatic audit/history retention are not provided.

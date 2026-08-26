@@ -30,8 +30,8 @@ The mounted storage root and its `.swadrive-volume` marker remain
 administrator-controlled and must not be replaceable by the runtime account.
 The pre-provisioned `files/`, `uploads/`, and `trash/` content subdirectories are
 the service-writable data boundary. Exact production ownership, modes, mount
-ordering, and systemd writable-path rules remain deployment work and must
-support these boundaries without granting broader access.
+ordering, and systemd writable-path rules are deployment responsibilities and
+must support these boundaries without granting broader access.
 
 The production binary remains administrator-owned under a release directory,
 and configuration remains administrator-controlled under a separate config

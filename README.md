@@ -2,20 +2,30 @@
 
 SwaDrive adalah project personal untuk membangun private cloud sederhana yang saya kelola sendiri. Backend Go dirancang berjalan pada storage server Linux dan diakses client Flutter melalui private tailnet, tanpa membuka layanan file ke internet publik.
 
-Project ini menjadi tempat saya mempraktikkan Linux administration, networking, service isolation, least privilege, Go, Flutter, dan secure software engineering. Backend v1 sudah diimplementasikan dan diuji secara lokal; Flutter product flow dan deployment production berikutnya masih terpisah.
+Project ini menjadi tempat saya mempraktikkan Linux administration, networking, service isolation, least privilege, Go, Flutter, dan secure software engineering. Backend v1 sudah menjadi baseline production; Flutter product flow masih terpisah dan belum diimplementasikan.
 
 ## Status Project
 
-| Area | Status | Bukti pada repository |
+| Area | Status | Bukti/status |
 | --- | --- | --- |
 | Go HTTP foundation | Selesai | Health endpoint dan handler test |
-| Linux service foundation | Terverifikasi di lingkungan pemilik | systemd dan restricted service account |
-| Private networking | Terverifikasi di lingkungan pemilik | akses melalui Tailscale dengan rule sempit |
-| Application authentication | Backend v1 selesai secara lokal | Argon2id, opaque sessions, revocation, limiter, audit |
-| File API | Backend v1 selesai secara lokal | logical-path API, SQLite metadata index, owner authorization |
-| Resumable transfer | Backend v1 selesai secara lokal | streaming fixed chunks, restart recovery, atomic publication |
+| Linux service foundation | Production | systemd dan restricted service account |
+| Private networking | Production | akses melalui Tailscale dengan rule sempit |
+| Application authentication | Backend v1 production baseline | Argon2id, opaque sessions, revocation, limiter, audit |
+| File API | Backend v1 production baseline | logical-path API, SQLite metadata index, owner authorization |
+| Resumable transfer | Backend v1 production baseline | streaming fixed chunks, restart recovery, atomic publication |
 | Flutter client | Scaffold | belum memiliki login atau file browser |
-| Production deployment backend v1 | Belum dilakukan | memerlukan review mount, ownership, Tailscale, backup, dan capacity |
+| Production deployment backend v1 | Dirilis 2026-08-26 | Debian, systemd, NVMe metadata, HDD content, Tailscale |
+
+## Release
+
+Current stable release: [`v1.0.0`](docs/releases/v1.0.0.md)
+
+Next major target: [`v2.0.0`](docs/releases/NEXT.md)
+
+Ringkasan perubahan tersedia di [CHANGELOG](CHANGELOG.md). Release `v1.0.0`
+menetapkan frozen backend source
+`accbe9223e2591fe7a88fe4652031f3bdfc529a9` sebagai production baseline.
 
 Health endpoint yang tersedia saat ini:
 
@@ -99,7 +109,8 @@ SwaDrive/
 ├── docs/
 │   ├── architecture.md
 │   ├── security-model.md
-│   └── adr/
+│   ├── adr/
+│   └── releases/
 ├── SECURITY.md
 └── README.md
 ```
@@ -177,13 +188,14 @@ Client saat ini masih scaffold. Tidak ada credential, server address production,
 
 ## Roadmap
 
-1. selesaikan final independent review dan freeze backend Go v1;
-2. review/deploy OS storage, mount, ownership, Tailscale, backup, dan monitoring;
-3. Flutter login dan file browser;
-4. integrasi client dengan Range dan resumable upload yang sudah tersedia;
-5. hardening dan observability berdasarkan penggunaan nyata.
+Target major development berikutnya adalah `v2.0.0`. Scope fiturnya belum
+ditetapkan sebagai komitmen dan hanya akan ditambahkan setelah keputusan
+implementasi disetujui. Lihat visible planning flag pada
+[`docs/releases/NEXT.md`](docs/releases/NEXT.md).
 
-Setiap endpoint protected harus memiliki negative authorization tests. Implementasi file path harus menguji traversal, symlink escape, conflict, permission failure, dan cancellation.
+Setiap endpoint protected harus memiliki negative authorization tests.
+Implementasi file path harus menguji traversal, symlink escape, conflict,
+permission failure, dan cancellation.
 
 ## Yang Saya Pelajari
 
@@ -196,14 +208,16 @@ Setiap endpoint protected harus memiliki negative authorization tests. Implement
 
 ## Status Publikasi
 
-Repository ini adalah engineering work-in-progress, bukan produk selesai. Backend v1 memiliki tested security controls, tetapi belum dinyatakan production-ready; Flutter product flow juga belum tersedia.
+`v1.0.0` adalah stable production baseline pertama SwaDrive. Pengembangan
+berikutnya tetap berlangsung dan Flutter product flow belum tersedia.
 
-Project belum memiliki stable release atau lisensi open-source. Lihat [SECURITY.md](SECURITY.md) untuk pelaporan masalah keamanan.
+Project belum memiliki lisensi open-source. Lihat [SECURITY.md](SECURITY.md)
+untuk pelaporan masalah keamanan.
 
 ## Backend v1
 
-Backend v1 is implemented and verified locally but has not been deployed to
-production.
+Backend v1 is implemented, verified, and deployed as the `v1.0.0` production
+baseline.
 
 The current Go backend includes:
 
@@ -237,6 +251,6 @@ metadata-plane, process-coordination, and storage-identity decisions.
 
 Passwords are one-way Argon2id hashes and raw session tokens are represented in
 SQLite only by SHA-256 digests. This is not application encryption of user
-files or SQLite. The Go app does not terminate TLS; transport confidentiality is
-assigned to the later verified Tailscale deployment. Filesystem/database
-encryption at rest remains an OS/storage product decision.
+files or SQLite. The Go app does not terminate TLS; production access is routed
+through the private Tailscale boundary. Filesystem/database encryption at rest
+remains an OS/storage product decision.
