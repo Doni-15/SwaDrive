@@ -560,6 +560,9 @@ func (service *Service) RunCleanup(ctx context.Context, interval time.Duration) 
 			return nil
 		case <-ticker.C:
 			if _, err := service.CleanupExpired(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				if errors.Is(err, storage.ErrUnavailable) {
+					continue
+				}
 				return err
 			}
 		}

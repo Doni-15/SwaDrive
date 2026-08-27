@@ -7,25 +7,29 @@ file ke internet publik.
 
 Proyek ini menjadi sarana untuk mempraktikkan administrasi Linux, networking,
 isolasi service, least privilege, Go, Flutter, dan secure software engineering.
-Backend `v1.0.0` telah menjadi baseline untuk production, sedangkan alur produk
-Flutter masih berupa scaffold dan belum diimplementasikan.
+Backend `v1.0.0` telah menjadi baseline untuk production. Patch keandalan
+`v1.0.1` disiapkan agar API tetap dapat dijangkau ketika content storage tidak
+tersedia, sedangkan alur produk Flutter masih berupa scaffold dan belum
+diimplementasikan.
 
 ## Status Proyek
 
 | Area | Status | Bukti/status |
 | --- | --- | --- |
-| Fondasi HTTP backend Go | Production `v1.0.0` | Health endpoint dan test handler |
+| Fondasi HTTP backend Go | Patch `v1.0.1` disiapkan | Health melaporkan storage dan degraded storage mode |
 | Fondasi service di Linux | Production `v1.0.0` | `systemd` dan service account terbatas |
 | Jaringan privat | Production `v1.0.0` | Akses Tailscale dengan rule akses yang ketat |
 | Autentikasi aplikasi | Production `v1.0.0` | Argon2id, server-side session berbasis opaque token, pencabutan, limiter, dan audit log |
-| File API | Production `v1.0.0` | API berbasis logical path, metadata index SQLite, dan otorisasi owner |
-| Resumable transfer | Production `v1.0.0` | Streaming berbasis fixed chunk, recovery setelah restart, dan publikasi atomik |
+| File API | Patch `v1.0.1` disiapkan | Operasi content fail-closed dengan `storage_unavailable` |
+| Resumable transfer | Patch `v1.0.1` disiapkan | Streaming fixed chunk tetap fail-closed saat storage tidak tersedia |
 | Client Flutter | Scaffold | Belum memiliki login atau file browser |
 | Deployment backend | Production `v1.0.0` | Dirilis 2026-08-26 pada Debian dengan `systemd`, metadata pada NVMe, isi file pada HDD, dan Tailscale |
 
 ## Rilis
 
-Rilis stabil saat ini: [SwaDrive `v1.0.0`](docs/releases/v1.0.0.md)
+Baseline production saat ini: [SwaDrive `v1.0.0`](docs/releases/v1.0.0.md)
+
+Patch yang disiapkan: [SwaDrive `v1.0.1`](docs/releases/v1.0.1.md)
 
 Target major berikutnya: [SwaDrive `v2.0.0`](docs/releases/NEXT.md)
 
@@ -39,15 +43,20 @@ kontribusi eksternal dan pull request tidak sedang diterima. Repository ini
 saat ini tidak menyediakan lisensi open source. Pelaporan kerentanan tetap
 ditangani secara terpisah melalui [kebijakan keamanan](SECURITY.md).
 
-Health endpoint yang tersedia saat ini:
+Health endpoint `v1.0.1` melaporkan kesehatan proses dan ketersediaan content
+storage secara terpisah:
 
 ```http
 GET /api/v1/health
 ```
 
 ```json
-{"status":"ok"}
+{"status":"ok","storage":"available"}
 ```
+
+Jika content storage tidak dapat diverifikasi, endpoint yang sama tetap
+merespons HTTP 200 dengan
+`{"status":"degraded","storage":"unavailable"}`.
 
 ## Tujuan
 
@@ -77,7 +86,10 @@ file-sharing service, atau pengganti administrasi melalui SSH.
   metadata tanpa melakukan tree scan pada HDD dalam operasi normal;
 - audit log append-only untuk aktivitas autentikasi, session, file, dan upload;
 - command lokal bagi administrator untuk melakukan bootstrap owner, reindex
-  metadata, dan melakukan reconciliation terhadap orphan upload part.
+  metadata, dan melakukan reconciliation terhadap orphan upload part;
+- degraded storage mode yang menjaga autentikasi, session, dan health tetap
+  dapat dijangkau, sementara operasi content ditolak dengan HTTP 503 dan kode
+  `storage_unavailable`.
 
 Backend telah melewati unit test dan integration test, `go vet`, race test,
 build statis untuk Linux, serta vulnerability scan yang tidak menemukan
@@ -169,8 +181,9 @@ tidak menyiapkan abstraksi, container, atau layer deployment spekulatif.
 Persyaratan: Go sesuai versi module pada `server/go.mod`.
 
 Backend memerlukan path database, content root, dan identitas volume yang
-eksplisit. Contoh berikut memakai placeholder lokal; administrator harus
-menyediakan marker sebelum service account menjalankan server:
+eksplisit. Contoh berikut memakai placeholder lokal. Marker harus tersedia dan
+sesuai sebelum operasi content diaktifkan; tanpa marker yang valid, proses tetap
+berjalan dalam degraded storage mode:
 
 ```bash
 printf '%s\n' '<volume-id>' > '<storage-root>/.swadrive-volume'
@@ -206,6 +219,16 @@ lock untuk koordinasi proses. Flock mengoordinasikan proses SwaDrive yang
 bekerja sama, bukan melindungi dari writer berbahaya dengan UID yang sama. Tata
 letak permission yang tepat tetap menjadi keputusan deployment dan harus diuji.
 
+Provider storage `v1.0.1` memverifikasi marker, directory wajib, dan batas satu
+filesystem sebelum setiap operasi content. Jika verifikasi gagal saat startup
+atau runtime, storage ditandai tidak tersedia hingga proses di-restart. Aplikasi
+tidak melakukan pemulihan otomatis di dalam proses agar reconciliation
+trash/upload dan pemeriksaan kesehatan metadata selalu dijalankan sebelum
+content access dibuka kembali. Unit `systemd` aktual tidak boleh memiliki
+dependensi wajib pada mount yang mencegah proses backend dimulai; perubahan ini
+tidak mengurangi service account, permission, sandbox, firewall, atau batas
+Tailscale.
+
 Command administrasi lokal berikut bukan HTTP endpoint:
 
 ```bash
@@ -221,6 +244,9 @@ dari host yang diizinkan oleh kebijakan jaringan privat:
 ```bash
 curl http://127.0.0.1:8080/api/v1/health
 ```
+
+Client harus membedakan kegagalan koneksi dari error API. Kontrak ringkas untuk
+scaffold Flutter tersedia dalam [README client](client/README.md).
 
 ## Menjalankan Scaffold Flutter
 

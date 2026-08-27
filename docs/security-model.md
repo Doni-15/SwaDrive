@@ -1,9 +1,10 @@
 # Model Keamanan SwaDrive
 
 Dokumen ini menjelaskan aset, trust boundary, identitas, kontrol keamanan, dan
-keterbatasan yang berlaku pada SwaDrive `v1.0.0`. Keputusan historis yang
-mendasarinya tetap dicatat dalam [ADR](adr/README.md). Jalur untuk melaporkan
-kerentanan dijelaskan terpisah dalam [kebijakan keamanan](../SECURITY.md).
+keterbatasan yang berlaku pada baseline SwaDrive `v1.0.0` beserta patch
+keandalan `v1.0.1`. Keputusan historis yang mendasarinya tetap dicatat dalam
+[ADR](adr/README.md). Jalur untuk melaporkan kerentanan dijelaskan terpisah
+dalam [kebijakan keamanan](../SECURITY.md).
 
 ## Aset yang Dilindungi
 
@@ -76,6 +77,12 @@ jaringan privat.
     production wajib memverifikasi mount dan ownership pada OS.
 11. Flock hanya mengoordinasikan proses SwaDrive yang bekerja sama;
     mekanisme ini bukan isolasi terhadap writer berbahaya dengan UID yang sama.
+12. Kegagalan membuka atau memverifikasi content storage hanya boleh
+    menurunkan data plane; proses HTTP, autentikasi, dan session tidak boleh
+    ikut gagal selama SQLite/control plane sehat.
+13. Setiap operasi content wajib memakai root yang baru saja lolos validasi
+    marker, directory wajib, dan persyaratan satu filesystem. Directory lokal di
+    balik mount point tidak boleh digunakan sebagai fallback.
 
 ## Kontrol yang Telah Diuji
 
@@ -93,6 +100,9 @@ jaringan privat.
 - integritas chunk paralel, recovery saat startup untuk status `finalizing`,
   dan kebijakan reconciliation terhadap orphan upload part oleh administrator;
 - database lock antarproses dan validasi marker volume.
+- startup tanpa volume content yang valid, health degraded, error khusus
+  `storage_unavailable`, runtime storage loss, dan penolakan penulisan ke
+  fallback root.
 
 ## Kebijakan Regression Test
 
@@ -170,6 +180,20 @@ mensyaratkan umur minimum, nama `.part` acak yang ketat, regular file, ketiadaan
 entry database, dan opsi `-apply` eksplisit; operasi ini tidak pernah
 memublikasikan file.
 
+Pada `v1.0.1`, state ketersediaan storage aman untuk akses serentak dan hanya
+dapat bertransisi dari `available` ke `unavailable` selama proses berjalan. Probe
+memverifikasi marker, directory wajib, dan satu filesystem sebelum content
+access. Kegagalan probe menghasilkan error domain `storage.ErrUnavailable`,
+yang dipetakan menjadi HTTP 503 `storage_unavailable` tanpa path fisik,
+detail mount, nama perangkat, atau error kernel. Transisi state dicatat sekali;
+request berikutnya tidak menghasilkan log probe berulang yang berisik.
+
+Provider tidak melakukan recovery otomatis. Setelah volume yang benar kembali,
+backend harus di-restart agar validasi storage, reconciliation trash/upload,
+dan pemeriksaan kesehatan metadata berjalan sebelum content access dibuka.
+Pembatasan ini mempertahankan operasi terputus yang sudah diketahui dan
+mencegah path yang sekadar muncul kembali langsung dianggap aman.
+
 ## Keterbatasan yang Diketahui
 
 API file, upload, dan audit pada `v1.0.0` masih hanya tersedia untuk owner, serta
@@ -188,4 +212,6 @@ dalam repository.
 
 Content search, OCR, thumbnail, dan encryption at rest pada level aplikasi tidak
 tersedia. Backend `v1.0.0` menjadi baseline untuk production pada 2026-08-26;
-client Flutter tetap berupa scaffold.
+client Flutter tetap berupa scaffold. Patch `v1.0.1` tidak menyediakan
+pemulihan storage di dalam proses; restart backend tetap diperlukan setelah volume
+yang diharapkan kembali tersedia.

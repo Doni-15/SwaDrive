@@ -127,7 +127,7 @@ func (application *httpTestApplication) rebuildHandler(reserve uint64, logger *s
 	)
 	application.handler = NewHandler(Dependencies{
 		Auth: application.auth, Audit: application.audit, Files: application.files,
-		Uploads: application.uploads, Logger: logger,
+		Uploads: application.uploads, Storage: staticStorageAvailability(true), Logger: logger,
 	})
 }
 
@@ -257,6 +257,86 @@ func TestAuthenticationHTTPFlowAndStableErrors(t *testing.T) {
 		t.Fatalf("expire HTTP session: %v", err)
 	}
 	assertError(t, application.request(http.MethodGet, "/api/v1/auth/me", nil, expiredToken, nil), http.StatusUnauthorized, "authentication_required")
+}
+
+func TestDegradedStorageKeepsControlPlaneReachableAndContentFailClosed(t *testing.T) {
+	application := newHTTPTestApplication(t)
+	storageRoot := filepath.Join(t.TempDir(), "unmounted-storage")
+	if err := os.Mkdir(storageRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	provider := storage.OpenProvider(storageRoot, "expected-volume", nil)
+	clock := func() time.Time { return *application.now }
+	application.files = files.NewService(
+		provider,
+		files.NewSQLiteTrashRepository(application.db),
+		files.NewSQLiteFileIndexRepository(application.db),
+		application.mutations,
+		application.audit,
+		files.DefaultConcurrentDownloads,
+		clock,
+	)
+	application.uploads = uploads.NewService(
+		uploads.NewSQLiteRepository(application.db),
+		provider,
+		application.mutations,
+		application.audit,
+		0,
+		uploads.DefaultConcurrentChunks,
+		clock,
+	)
+	application.handler = NewHandler(Dependencies{
+		Auth: application.auth, Audit: application.audit, Files: application.files,
+		Uploads: application.uploads, Storage: provider, Logger: slog.New(slog.DiscardHandler),
+	})
+
+	health := application.request(http.MethodGet, "/api/v1/health", nil, "", nil)
+	if health.Code != http.StatusOK || health.Body.String() != `{"status":"degraded","storage":"unavailable"}` {
+		t.Fatalf("degraded health = %d %s", health.Code, health.Body.String())
+	}
+	assertError(t, application.request(
+		http.MethodPost,
+		"/api/v1/folders",
+		mustJSON(t, map[string]string{"path": "unauthenticated"}),
+		"",
+		nil,
+	), http.StatusUnauthorized, "authentication_required")
+	token, _, login := application.login(t, testOwnerUsername, testOwnerPassword, "Degraded client")
+	if login.Code != http.StatusOK || token == "" {
+		t.Fatalf("degraded login = %d %s", login.Code, login.Body.String())
+	}
+	for _, target := range []string{"/api/v1/auth/me", "/api/v1/auth/sessions", "/api/v1/files"} {
+		response := application.request(http.MethodGet, target, nil, token, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s while degraded = %d %s", target, response.Code, response.Body.String())
+		}
+	}
+
+	folderError := assertError(t, application.request(
+		http.MethodPost,
+		"/api/v1/folders",
+		mustJSON(t, map[string]string{"path": "must-not-exist"}),
+		token,
+		nil,
+	), http.StatusServiceUnavailable, "storage_unavailable")
+	if folderError.Code == "server_busy" {
+		t.Fatal("storage unavailable was reported as server_busy")
+	}
+	assertError(t, application.request(
+		http.MethodPost,
+		"/api/v1/uploads",
+		mustJSON(t, map[string]any{"target_path": "upload.bin", "total_size": 1}),
+		token,
+		nil,
+	), http.StatusServiceUnavailable, "storage_unavailable")
+
+	entries, err := os.ReadDir(storageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("unmounted fallback root contains %d entries; want empty", len(entries))
+	}
 }
 
 func TestLoginRateLimitUsesRemotePeerAndAuditsDenial(t *testing.T) {

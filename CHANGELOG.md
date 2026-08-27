@@ -9,6 +9,30 @@ Target major berikutnya adalah `v2.0.0`.
 Belum ada fitur `v2.0.0` yang dicatat sebagai selesai. Lihat
 [penanda rilis `NEXT`](docs/releases/NEXT.md) untuk status perencanaan.
 
+## [v1.0.1] - 2026-08-27
+
+Patch keandalan untuk menjaga control plane dan HTTP API tetap dapat
+dijangkau ketika content storage tidak tersedia.
+
+### Diperbaiki
+
+- Backend tetap berjalan saat content storage tidak dapat dibuka atau
+  diverifikasi pada startup.
+- Health endpoint kini melaporkan `storage=available` atau
+  `storage=unavailable` dan memakai status aplikasi `degraded` untuk kondisi
+  kedua.
+- Operasi file dan upload yang membutuhkan HDD tetap fail-closed dengan HTTP
+  503 dan kode `storage_unavailable`, bukan `server_busy`.
+- Runtime storage loss menghentikan content access berikutnya tanpa menjatuhkan
+  proses dan tanpa memakai directory lokal di balik mount point sebagai
+  fallback.
+
+### Operasional
+
+- Pemulihan content storage memerlukan restart backend agar validasi identitas,
+  reconciliation trash/upload, dan pemeriksaan kesehatan metadata dijalankan
+  ulang sebelum operasi content dibuka kembali.
+
 ## [v1.0.0] - 2026-08-26
 
 Rilis production pertama. Deskripsi kanonis dan provenance rilis

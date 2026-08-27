@@ -72,14 +72,17 @@ func run(parentContext context.Context, configuration config.Server, logger *slo
 		return err
 	}
 
-	storageManager, err := storage.OpenVerified(
+	storageProvider := storage.OpenProvider(
 		configuration.StorageRoot,
 		configuration.StorageVolumeID,
+		func(available bool) {
+			if available {
+				logger.Info("storage available")
+				return
+			}
+			logger.Warn("storage unavailable")
+		},
 	)
-	if err != nil {
-		return err
-	}
-	defer storageManager.Close()
 
 	auditService := audit.NewService(audit.NewSQLiteRepository(db), nil)
 	mutationCoordinator := storage.NewMutationCoordinator()
@@ -92,16 +95,10 @@ func run(parentContext context.Context, configuration config.Server, logger *slo
 		return err
 	}
 	fileIndexRepository := files.NewSQLiteFileIndexRepository(db)
-	filesService := files.NewService(storageManager, files.NewSQLiteTrashRepository(db), fileIndexRepository, mutationCoordinator, auditService, configuration.MaxConcurrentDownloads, nil)
-	if _, err := filesService.ReconcileTrash(ctx); err != nil {
+	filesService := files.NewService(storageProvider, files.NewSQLiteTrashRepository(db), fileIndexRepository, mutationCoordinator, auditService, configuration.MaxConcurrentDownloads, nil)
+	uploadService := uploads.NewService(uploads.NewSQLiteRepository(db), storageProvider, mutationCoordinator, auditService, configuration.StorageReserveBytes, configuration.MaxConcurrentChunks, nil)
+	if err := reconcileAvailableStorage(ctx, storageProvider, filesService, uploadService, fileIndexRepository); err != nil {
 		return err
-	}
-	uploadService := uploads.NewService(uploads.NewSQLiteRepository(db), storageManager, mutationCoordinator, auditService, configuration.StorageReserveBytes, configuration.MaxConcurrentChunks, nil)
-	if _, err := uploadService.ReconcileFinalizing(ctx); err != nil {
-		return err
-	}
-	if err := fileIndexRepository.CheckHealthy(ctx); err != nil {
-		return errors.Join(files.ErrIndexInconsistent, err)
 	}
 
 	handler := httpapi.NewHandler(httpapi.Dependencies{
@@ -109,6 +106,7 @@ func run(parentContext context.Context, configuration config.Server, logger *slo
 		Audit:   auditService,
 		Files:   filesService,
 		Uploads: uploadService,
+		Storage: storageProvider,
 		Logger:  logger,
 	})
 	server := &http.Server{
@@ -157,4 +155,38 @@ func run(parentContext context.Context, configuration config.Server, logger *slo
 		return errors.Join(runError, shutdownError, fmt.Errorf("wait for upload cleanup worker: %w", shutdownContext.Err()))
 	}
 	return errors.Join(runError, shutdownError, cleanupError)
+}
+
+func reconcileAvailableStorage(
+	ctx context.Context,
+	storageProvider *storage.Provider,
+	filesService *files.Service,
+	uploadService *uploads.Service,
+	fileIndexRepository *files.SQLiteFileIndexRepository,
+) error {
+	if !storageProvider.Available() {
+		return nil
+	}
+	if _, err := filesService.ReconcileTrash(ctx); err != nil {
+		if errors.Is(err, storage.ErrUnavailable) {
+			return nil
+		}
+		return err
+	}
+	if !storageProvider.Available() {
+		return nil
+	}
+	if _, err := uploadService.ReconcileFinalizing(ctx); err != nil {
+		if errors.Is(err, storage.ErrUnavailable) {
+			return nil
+		}
+		return err
+	}
+	if !storageProvider.Available() {
+		return nil
+	}
+	if err := fileIndexRepository.CheckHealthy(ctx); err != nil {
+		return errors.Join(files.ErrIndexInconsistent, err)
+	}
+	return nil
 }

@@ -28,6 +28,7 @@ var (
 	ErrDifferentFilesystem   = errors.New("files, uploads, and trash must share one filesystem")
 	ErrStorageVolumeRequired = errors.New("storage volume ID is required")
 	ErrStorageVolumeMismatch = errors.New("storage volume identity does not match")
+	ErrUnavailable           = errors.New("storage is unavailable")
 )
 
 const (
@@ -76,16 +77,16 @@ type Manager struct {
 }
 
 func Open(rootPath string) (*Manager, error) {
-	return open(rootPath, "", false)
+	return open(rootPath, "", false, true)
 }
 
 // OpenVerified verifies the expected SwaDrive volume before creating or
 // opening the content directories.
 func OpenVerified(rootPath, expectedVolumeID string) (*Manager, error) {
-	return open(rootPath, expectedVolumeID, true)
+	return open(rootPath, expectedVolumeID, true, true)
 }
 
-func open(rootPath, expectedVolumeID string, verifyVolume bool) (*Manager, error) {
+func open(rootPath, expectedVolumeID string, verifyVolume, initializeDirectories bool) (*Manager, error) {
 	if strings.TrimSpace(rootPath) == "" {
 		return nil, errors.New("storage root path is required")
 	}
@@ -109,8 +110,14 @@ func open(rootPath, expectedVolumeID string, verifyVolume bool) (*Manager, error
 	}
 
 	for _, directory := range []string{"files", "uploads", "trash"} {
-		if err := ensureDirectory(root, directory); err != nil {
-			return closeOnError(err)
+		var directoryErr error
+		if initializeDirectories {
+			directoryErr = ensureDirectory(root, directory)
+		} else {
+			directoryErr = inspectDirectory(root, directory)
+		}
+		if directoryErr != nil {
+			return closeOnError(directoryErr)
 		}
 	}
 
@@ -129,6 +136,14 @@ func open(rootPath, expectedVolumeID string, verifyVolume bool) (*Manager, error
 	}
 
 	return manager, nil
+}
+
+func verifyExisting(rootPath, expectedVolumeID string) error {
+	manager, err := open(rootPath, expectedVolumeID, true, false)
+	if manager != nil {
+		err = errors.Join(err, manager.Close())
+	}
+	return err
 }
 
 func verifyStorageVolume(root *os.Root, expectedVolumeID string) error {
@@ -633,6 +648,17 @@ func ensureDirectory(root *os.Root, name string) error {
 		}
 		info, err = root.Lstat(name)
 	}
+	if err != nil {
+		return fmt.Errorf("inspect storage directory %s: %w", name, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("storage directory %s must be a real directory", name)
+	}
+	return nil
+}
+
+func inspectDirectory(root *os.Root, name string) error {
+	info, err := root.Lstat(name)
 	if err != nil {
 		return fmt.Errorf("inspect storage directory %s: %w", name, err)
 	}

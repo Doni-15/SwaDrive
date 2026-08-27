@@ -86,6 +86,13 @@ interface jaringan privat.
 4. Perubahan state, metadata index, dan audit log diselesaikan melalui
    transaction, compensation, atau recovery sesuai jenis operasinya.
 
+Pada `v1.0.1`, provider storage memisahkan ketersediaan proses HTTP dari
+ketersediaan content plane. Login, `/auth/me`, pengelolaan session, health, dan
+API lain yang hanya membaca control/metadata plane dapat tetap bekerja secara
+aman ketika HDD tidak dapat diverifikasi. Setiap operasi yang memerlukan byte
+atau mutasi content terlebih dahulu melewati provider tersebut dan menerima
+`storage.ErrUnavailable` jika batas storage tertutup.
+
 ## Control Plane, Metadata Plane, dan Content Plane
 
 Isi file disimpan pada filesystem di content plane, bukan sebagai BLOB
@@ -132,6 +139,15 @@ boleh dapat diganti service, sedangkan subdirectory penyimpanan memang dapat
 ditulis service. Mode permission dan konfigurasi unit yang tepat bergantung pada
 deployment dan tidak disimpan dalam repository ini.
 
+Provider `v1.0.1` membuka root terverifikasi untuk setiap operasi content,
+memeriksa kembali marker, keberadaan `files/`, `uploads/`, dan `trash/`, serta
+persyaratan satu filesystem sebelum meneruskan operasi. Root terverifikasi
+berbasis `os.Root` memastikan operasi yang sudah dimulai tetap terikat pada
+filesystem tersebut dan tidak berpindah ke directory lokal di balik mount
+point. State ketersediaan aman untuk akses serentak dan hanya dapat berubah dari
+`available` menjadi `unavailable` selama masa hidup proses, sehingga path
+yang muncul kembali tidak langsung membuka data plane.
+
 ## Model Kegagalan
 
 Filesystem dan SQLite tidak dapat berbagi satu transaction. Trash, restore, dan
@@ -147,11 +163,23 @@ HDD scan. Upload part yang dibuat sebelum DB commit tidak dipublikasikan;
 administrator dapat menjalankan `reconcile-upload-parts` dengan pembatasan
 umur, nama, dan tipe setelah meninjau dry-run.
 
+Jika storage tidak tersedia pada startup, reconciliation trash dan upload yang
+memerlukan content plane ditunda dan HTTP server tetap dimulai dalam degraded
+storage mode. Jika storage hilang pada runtime, probe berikutnya menutup provider
+dan cleanup upload tidak menghentikan proses. `v1.0.1` sengaja tidak melakukan
+pemulihan otomatis di dalam proses. Operator harus mengembalikan volume yang
+benar dan me-restart backend; startup berikutnya memverifikasi identitas
+storage, directory wajib, satu filesystem, reconciliation yang diketahui, dan
+kesehatan metadata sebelum data plane tersedia kembali.
+
 ## Arsitektur Runtime dan Deployment
 
 Deployment di production menjalankan satu proses backend pada Debian sebagai
 service `systemd` dengan runtime service account terbatas. Akses aplikasi hanya
 diterima melalui tailnet privat. SQLite dan state operasional berada pada NVMe,
 sedangkan isi file berada pada HDD. Detail versi yang telah dirilis tersedia
-dalam [catatan rilis `v1.0.0`](releases/v1.0.0.md); status client tersedia dalam
-[README](../README.md).
+dalam [catatan rilis `v1.0.0`](releases/v1.0.0.md), sedangkan patch keandalan
+tersedia dalam [catatan rilis `v1.0.1`](releases/v1.0.1.md). Repository tidak
+melacak unit `systemd`; unit aktual harus mengizinkan backend dimulai tanpa HDD,
+tanpa mengurangi service account, permission, sandbox, firewall, atau batas
+Tailscale. Status client tersedia dalam [README](../README.md).

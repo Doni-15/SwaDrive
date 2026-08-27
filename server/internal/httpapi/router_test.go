@@ -9,24 +9,38 @@ import (
 	"time"
 )
 
-func TestHealthEndpoint(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
-	rec := httptest.NewRecorder()
-
-	NewHandler(Dependencies{}).ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status code = %d; want %d", rec.Code, http.StatusOK)
+func TestHealthEndpointReportsStorageAvailability(t *testing.T) {
+	tests := []struct {
+		name      string
+		available bool
+		body      string
+	}{
+		{name: "available", available: true, body: `{"status":"ok","storage":"available"}`},
+		{name: "unavailable", available: false, body: `{"status":"degraded","storage":"unavailable"}`},
 	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+			rec := httptest.NewRecorder()
 
-	if got := rec.Header().Get("Content-Type"); got != "application/json" {
-		t.Fatalf("Content-Type = %q; want %q", got, "application/json")
-	}
+			NewHandler(Dependencies{Storage: staticStorageAvailability(test.available)}).ServeHTTP(rec, req)
 
-	if got, want := rec.Body.String(), `{"status":"ok"}`; got != want {
-		t.Fatalf("body = %q; want %q", got, want)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status code = %d; want %d", rec.Code, http.StatusOK)
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/json" {
+				t.Fatalf("Content-Type = %q; want %q", got, "application/json")
+			}
+			if got := rec.Body.String(); got != test.body {
+				t.Fatalf("body = %q; want %q", got, test.body)
+			}
+		})
 	}
 }
+
+type staticStorageAvailability bool
+
+func (available staticStorageAvailability) Available() bool { return bool(available) }
 
 func TestLoginAdmissionGateRejectsExcessBeforeReadingBody(t *testing.T) {
 	server := &server{

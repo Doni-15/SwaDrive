@@ -13,6 +13,7 @@ import (
 	"github.com/Doni-15/SwaDrive/server/internal/audit"
 	"github.com/Doni-15/SwaDrive/server/internal/auth"
 	"github.com/Doni-15/SwaDrive/server/internal/files"
+	"github.com/Doni-15/SwaDrive/server/internal/storage"
 	"github.com/Doni-15/SwaDrive/server/internal/uploads"
 )
 
@@ -21,7 +22,12 @@ type Dependencies struct {
 	Audit   *audit.Service
 	Files   *files.Service
 	Uploads *uploads.Service
+	Storage StorageAvailability
 	Logger  *slog.Logger
+}
+
+type StorageAvailability interface {
+	Available() bool
 }
 
 type server struct {
@@ -29,6 +35,7 @@ type server struct {
 	audit           *audit.Service
 	files           *files.Service
 	uploads         *uploads.Service
+	storage         StorageAvailability
 	logger          *slog.Logger
 	loginAdmissions chan struct{}
 }
@@ -50,6 +57,7 @@ func NewHandler(dependencies Dependencies) http.Handler {
 		audit:           dependencies.Audit,
 		files:           dependencies.Files,
 		uploads:         dependencies.Uploads,
+		storage:         dependencies.Storage,
 		logger:          logger,
 		loginAdmissions: make(chan struct{}, maximumConcurrentLoginRequests),
 	}
@@ -64,6 +72,9 @@ func NewHandler(dependencies Dependencies) http.Handler {
 			mux.HandleFunc(routePath, server.methodNotAllowed)
 		}
 	}
+	ownerContent := func(handler http.Handler) http.Handler {
+		return server.requireAuthentication(server.requireStorage(handler), true)
+	}
 
 	handle("GET /api/v1/health", http.HandlerFunc(server.health))
 	handle("POST /api/v1/auth/login", http.HandlerFunc(server.login))
@@ -76,28 +87,44 @@ func NewHandler(dependencies Dependencies) http.Handler {
 
 	handle("GET /api/v1/files", server.requireAuthentication(http.HandlerFunc(server.listFiles), true))
 	handle("GET /api/v1/files/metadata", server.requireAuthentication(http.HandlerFunc(server.fileMetadata), true))
-	handle("POST /api/v1/folders", server.requireAuthentication(http.HandlerFunc(server.createFolder), true))
-	handle("POST /api/v1/files/move", server.requireAuthentication(http.HandlerFunc(server.moveFile), true))
-	handle("POST /api/v1/files/trash", server.requireAuthentication(http.HandlerFunc(server.trashFile), true))
+	handle("POST /api/v1/folders", ownerContent(http.HandlerFunc(server.createFolder)))
+	handle("POST /api/v1/files/move", ownerContent(http.HandlerFunc(server.moveFile)))
+	handle("POST /api/v1/files/trash", ownerContent(http.HandlerFunc(server.trashFile)))
 	handle("GET /api/v1/trash", server.requireAuthentication(http.HandlerFunc(server.listTrash), true))
-	handle("POST /api/v1/trash/{id}/restore", server.requireAuthentication(http.HandlerFunc(server.restoreTrash), true))
+	handle("POST /api/v1/trash/{id}/restore", ownerContent(http.HandlerFunc(server.restoreTrash)))
 	handle("GET /api/v1/files/search", server.requireAuthentication(http.HandlerFunc(server.searchFiles), true))
-	handle("GET /api/v1/files/content", server.requireAuthentication(http.HandlerFunc(server.downloadFile), true))
+	handle("GET /api/v1/files/content", ownerContent(http.HandlerFunc(server.downloadFile)))
 
-	handle("POST /api/v1/uploads", server.requireAuthentication(http.HandlerFunc(server.createUpload), true))
+	handle("POST /api/v1/uploads", ownerContent(http.HandlerFunc(server.createUpload)))
 	handle("GET /api/v1/uploads/{id}", server.requireAuthentication(http.HandlerFunc(server.getUpload), true))
-	handle("PUT /api/v1/uploads/{id}/chunks/{index}", server.requireAuthentication(http.HandlerFunc(server.putUploadChunk), true))
-	handle("POST /api/v1/uploads/{id}/complete", server.requireAuthentication(http.HandlerFunc(server.completeUpload), true))
-	handle("DELETE /api/v1/uploads/{id}", server.requireAuthentication(http.HandlerFunc(server.cancelUpload), true))
+	handle("PUT /api/v1/uploads/{id}/chunks/{index}", ownerContent(http.HandlerFunc(server.putUploadChunk)))
+	handle("POST /api/v1/uploads/{id}/complete", ownerContent(http.HandlerFunc(server.completeUpload)))
+	handle("DELETE /api/v1/uploads/{id}", ownerContent(http.HandlerFunc(server.cancelUpload)))
 
 	mux.HandleFunc("/api/v1/", server.notFound)
 	return server.requestMiddleware(mux)
 }
 
 func (server *server) health(w http.ResponseWriter, _ *http.Request) {
+	status := "ok"
+	storageStatus := "available"
+	if server.storage == nil || !server.storage.Available() {
+		status = "degraded"
+		storageStatus = "unavailable"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
+	_, _ = w.Write([]byte(`{"status":"` + status + `","storage":"` + storageStatus + `"}`))
+}
+
+func (server *server) requireStorage(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if server.storage == nil || !server.storage.Available() {
+			server.writeServiceError(w, request, storage.ErrUnavailable)
+			return
+		}
+		next.ServeHTTP(w, request)
+	})
 }
 
 func (server *server) requireAuthentication(next http.Handler, ownerOnly bool) http.Handler {

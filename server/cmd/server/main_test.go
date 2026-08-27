@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +18,6 @@ import (
 	"github.com/Doni-15/SwaDrive/server/internal/config"
 	"github.com/Doni-15/SwaDrive/server/internal/database"
 	"github.com/Doni-15/SwaDrive/server/internal/files"
-	"github.com/Doni-15/SwaDrive/server/internal/storage"
 )
 
 func TestMaximumHTTPHeaderBytesIs64KiB(t *testing.T) {
@@ -25,7 +26,7 @@ func TestMaximumHTTPHeaderBytesIs64KiB(t *testing.T) {
 	}
 }
 
-func TestRunFailsClosedWhenStorageVolumeIdentityIsMissing(t *testing.T) {
+func TestRunStartsHTTPServiceWhenStorageVolumeIdentityIsMissing(t *testing.T) {
 	base := t.TempDir()
 	databasePath := filepath.Join(base, "state.db")
 	storageRoot := filepath.Join(base, "storage")
@@ -34,17 +35,41 @@ func TestRunFailsClosedWhenStorageVolumeIdentityIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	err := run(context.Background(), config.Server{
-		DatabasePath:    databasePath,
-		StorageRoot:     storageRoot,
-		StorageVolumeID: "expected-volume",
-	}, logger)
-	if !errors.Is(err, storage.ErrStorageVolumeMismatch) {
-		t.Fatalf(
-			"run() error = %v; want ErrStorageVolumeMismatch",
-			err,
-		)
+	ready := make(chan struct{})
+	logger := slog.New(&serverReadyHandler{ready: ready})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- run(ctx, config.Server{
+			ListenAddress:         "127.0.0.1:0",
+			DatabasePath:          databasePath,
+			StorageRoot:           storageRoot,
+			StorageVolumeID:       "expected-volume",
+			UploadCleanupInterval: time.Hour,
+		}, logger)
+	}()
+	select {
+	case <-ready:
+	case err := <-result:
+		t.Fatalf("run() stopped before listening: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("degraded server did not reach listening state")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("degraded server stopped unexpectedly: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("run(cancelled) error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("degraded server did not stop after cancellation")
 	}
 
 	for _, directory := range []string{"files", "uploads", "trash"} {
@@ -103,6 +128,7 @@ func TestRunWaitsForCleanupWorkerWithinShutdownDeadline(t *testing.T) {
 	ready := make(chan struct{})
 	logger := slog.New(&serverReadyHandler{ready: ready})
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	result := make(chan error, 1)
 	go func() {
 		result <- run(ctx, config.Server{
@@ -134,6 +160,102 @@ func TestRunWaitsForCleanupWorkerWithinShutdownDeadline(t *testing.T) {
 		t.Fatalf("database lock not released after bounded cleanup shutdown wait: %v", err)
 	}
 	_ = lock.Close()
+}
+
+func TestRunRemainsAliveAndHealthDegradesAfterRuntimeStorageLoss(t *testing.T) {
+	base := t.TempDir()
+	databasePath := filepath.Join(base, "state.db")
+	storageRoot := filepath.Join(base, "storage")
+	if err := os.Mkdir(storageRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const volumeID = "runtime-server-volume"
+	if err := os.WriteFile(filepath.Join(storageRoot, ".swadrive-volume"), []byte(volumeID+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenAddress := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ready := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- run(ctx, config.Server{
+			ListenAddress:         listenAddress,
+			DatabasePath:          databasePath,
+			StorageRoot:           storageRoot,
+			StorageVolumeID:       volumeID,
+			UploadCleanupInterval: time.Hour,
+		}, slog.New(&serverReadyHandler{ready: ready}))
+	}()
+	select {
+	case <-ready:
+	case err := <-result:
+		t.Fatalf("run() stopped before listening: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("server did not reach listening state")
+	}
+
+	client := &http.Client{Timeout: time.Second}
+	healthURL := "http://" + listenAddress + "/api/v1/health"
+	waitForHealthBody := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			response, requestErr := client.Get(healthURL)
+			if requestErr == nil {
+				body, readErr := io.ReadAll(response.Body)
+				_ = response.Body.Close()
+				if readErr == nil && response.StatusCode == http.StatusOK && string(body) == want {
+					return
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("health did not become %s", want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitForHealthBody(`{"status":"ok","storage":"available"}`)
+
+	detachedRoot := filepath.Join(base, "detached-storage")
+	if err := os.Rename(storageRoot, detachedRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(storageRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	waitForHealthBody(`{"status":"degraded","storage":"unavailable"}`)
+	select {
+	case err := <-result:
+		t.Fatalf("server stopped after runtime storage loss: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	entries, err := os.ReadDir(storageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("fallback root contains %d entries after health probe; want empty", len(entries))
+	}
+
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("run(cancelled) error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not stop after cancellation")
+	}
 }
 
 func TestRunFailsClosedOnInterruptedFileMutationIntent(t *testing.T) {

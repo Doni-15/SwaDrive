@@ -96,6 +96,8 @@ func (server *server) writeServiceError(w http.ResponseWriter, request *http.Req
 	var rateLimitError *auth.RateLimitError
 	var maxBytesError *http.MaxBytesError
 	switch {
+	case errors.Is(err, storage.ErrUnavailable):
+		writeError(w, request, http.StatusServiceUnavailable, "storage_unavailable", "Server storage is currently unavailable.")
 	case errors.Is(err, files.ErrIndexInconsistent):
 		server.logger.ErrorContext(request.Context(), "file metadata index is unavailable", "request_id", requestID(request), "error_type", "file_index_inconsistent")
 		writeError(w, request, http.StatusServiceUnavailable, "metadata_unavailable", "File metadata is unavailable until an administrator repairs the index.")

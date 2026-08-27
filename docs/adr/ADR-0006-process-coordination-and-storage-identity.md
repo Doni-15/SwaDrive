@@ -43,6 +43,21 @@ dengan UID yang sama. Ownership, mode permission, urutan mount, dan pembatasan
 `systemd` yang tepat merupakan tanggung jawab deployment. Batas tersebut harus
 diverifikasi secara independen dari kontrol pada source code.
 
+## Amendemen v1.0.1 — Ketersediaan Proses dan Storage
+
+Patch `v1.0.1` tidak mengubah keputusan identitas storage di atas. Marker yang
+salah atau hilang tetap menutup seluruh content access dan tetap tidak boleh
+memicu inisialisasi directory pada fallback root. Perubahan patch hanya
+memisahkan ketersediaan proses HTTP dari data plane: backend dapat dimulai dan
+melayani health, autentikasi, serta session ketika storage tidak lolos validasi.
+
+Provider storage `v1.0.1` memeriksa ulang marker, directory wajib, dan batas
+satu filesystem sebelum operasi content. State hanya dapat bertransisi dari
+`available` menjadi `unavailable` selama masa hidup proses. Volume yang kembali
+tidak dibuka otomatis; restart diperlukan agar startup reconciliation dan
+pemeriksaan kesehatan metadata diselesaikan sebelum data plane aktif. Bagian
+sebelumnya tetap mencatat perilaku dan keputusan historis `v1.0.0` secara utuh.
+
 ## Konsekuensi
 
 - Proses server dan command administrasi yang bekerja sama segera gagal,
