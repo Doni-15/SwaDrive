@@ -33,15 +33,15 @@ membuka root yang dikonfigurasi melalui `os.Root` dan mewajibkan
 persis dengan `SWADRIVE_STORAGE_VOLUME_ID`. Marker merupakan pemeriksaan
 identitas aplikasi, bukan bukti bahwa HDD yang dituju telah ter-mount.
 
-Deployment production harus menjaga storage root yang ter-mount dan marker
+Deployment di production harus menjaga storage root yang ter-mount dan marker
 tetap dikendalikan administrator serta tidak dapat diganti oleh runtime service
-account. Subdirectory `files/`, `uploads/`, dan `trash/` merupakan content
-boundary yang dapat ditulis service. Area state harus tetap dapat ditulis
-secukupnya untuk operasi database/WAL/SHM SQLite dan coordination lock di
-sampingnya. Flock bukan batas keamanan terhadap writer berbahaya dengan UID
-yang sama. Ownership, mode permission, urutan mount, dan pembatasan `systemd`
-yang tepat merupakan tanggung jawab deployment. Batas tersebut harus
-diverifikasi secara independen dari kontrol pada level source.
+account. Subdirectory `files/`, `uploads/`, dan `trash/` merupakan batas
+penyimpanan yang dapat ditulis service. Area state harus tetap dapat ditulis
+secukupnya untuk operasi database/WAL/SHM SQLite dan lock untuk koordinasi
+proses di sampingnya. Flock bukan batas keamanan terhadap writer berbahaya
+dengan UID yang sama. Ownership, mode permission, urutan mount, dan pembatasan
+`systemd` yang tepat merupakan tanggung jawab deployment. Batas tersebut harus
+diverifikasi secara independen dari kontrol pada source code.
 
 ## Konsekuensi
 

@@ -12,14 +12,14 @@ restart server tanpa mengekspos file parsial dalam file tree normal. Finalisasi
 harus menolak isi yang hilang atau rusak dan tidak boleh mengganti file yang
 sudah ada pada path tujuan secara diam-diam.
 
-Mengadopsi route terpisah untuk file kecil akan menduplikasi rule transfer dan
+Mengadopsi route terpisah untuk file kecil akan menduplikasi aturan transfer dan
 integritas. Menyimpan satu file sementara per chunk juga akan memperbanyak objek
 filesystem dan memerlukan tahap assembly atau penyalinan kedua saat finalisasi.
 
 ## Keputusan
 
-Gunakan satu protocol resumable upload berbasis server-side session untuk semua
-ukuran file. Pembuatan upload menyimpan logical target path, ukuran total,
+Gunakan satu protokol resumable upload berbasis server-side session untuk semua
+ukuran file. Pembuatan upload menyimpan logical path tujuan, ukuran total,
 ukuran fixed chunk, jumlah total chunk, masa berlaku, status, dan SHA-256
 keseluruhan file yang opsional. Ukuran chunk yang diizinkan adalah 1, 2, 4, 8,
 dan 16 MiB; default-nya 4 MiB dan maksimum 16 MiB.
@@ -45,17 +45,17 @@ yang sama. Upload kemudian ditandai `completed` dan baris metadata index aktif
 ditambahkan. Status perantara memungkinkan service yang telah restart
 merekonsiliasi rename yang berhasil sebelum pembaruan status dan index
 terakhir. File yang sudah ada pada path tujuan tidak pernah ditimpa. Status
-`completed`, penambahan file index, dan audit event finalisasi di-commit dalam
-satu transaction SQLite; kegagalan
-membiarkan state `finalizing` yang durable untuk recovery dan menandai
-ketidaksesuaian metadata yang diketahui sebagai unhealthy.
+`completed`, penambahan metadata index, dan audit event finalisasi di-commit
+dalam satu transaction SQLite. Jika transaction gagal, status `finalizing`
+tetap menjadi durable state untuk recovery dan ketidaksesuaian metadata yang
+diketahui ditandai sebagai unhealthy.
 
 Sebelum melayani HTTP, startup hanya memeriksa upload `finalizing` yang telah
 diketahui dalam batch terbatas. Jika part tersedia dan path tujuan belum ada,
 status dikembalikan ke pending. Jika part tidak ada dan path tujuan tersedia,
 index dikonfirmasi dan upload diselesaikan beserta audit. Jika keduanya tersedia
-atau keduanya tidak tersedia, startup dihentikan. Ini merupakan targeted
-reconciliation, bukan content tree scan. Satu process-local mutation
+atau keduanya tidak tersedia, startup dihentikan. Ini merupakan reconciliation
+terarah, bukan scan terhadap content tree. Satu process-local mutation
 coordinator yang dipakai bersama mencegah operasi move atau trash secara
 concurrent berselang di antara publikasi dan commit index.
 
@@ -84,10 +84,10 @@ batas scan terlampaui, command gagal tanpa melakukan penghapusan parsial.
 
 Jika pembatalan atau kedaluwarsa menghapus part yang diketahui dan proses
 berhenti sebelum memperbarui SQLite, cleanup setelah restart memperlakukan part
-yang hilang sebagai sudah dihapus dan secara durable menandai baris pending yang
-diketahui sebagai expired. Proses ini tidak pernah membuat entry index.
+yang hilang sebagai sudah dihapus dan mencatat status `expired` secara durable
+pada baris pending yang diketahui. Proses ini tidak pernah membuat entry index.
 
-Download memakai perilaku byte Range HTTP standar, bukan protocol download
+Download memakai perilaku byte Range HTTP standar, bukan protokol download
 berbasis session yang terpisah.
 
 ## Konsekuensi
@@ -124,7 +124,7 @@ berbasis session yang terpisah.
 - **Overwrite path tujuan secara diam-diam:** ditolak karena upload tidak boleh
   menghancurkan file yang sudah ada tanpa kebijakan overwrite eksplisit di masa
   mendatang.
-- **TUS pada backend `v1.0.0`:** ditolak karena menambah kompleksitas protocol
+- **TUS pada backend `v1.0.0`:** ditolak karena menambah kompleksitas protokol
   atau framework yang tidak diperlukan untuk kebutuhan privat satu server saat
   ini; keputusan ini dapat ditinjau ulang melalui ADR pengganti jika kebutuhan
   interoperability berubah.

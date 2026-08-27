@@ -8,11 +8,11 @@ Status: **DIRENCANAKAN / TARGET PENGEMBANGAN**
 
 `v2.0.0` belum dirilis. Seluruh entri dalam dokumen ini adalah catatan
 perencanaan dan bukan fitur yang dijanjikan sampai implementasinya selesai,
-diuji, diverifikasi terhadap source, dan dicatat dalam catatan rilis.
+diuji, diverifikasi terhadap source code, dan dicatat dalam catatan rilis.
 
 ## Target
 
-Target major berikutnya adalah `v2.0.0`. Baseline production stabil tetap
+Target major berikutnya adalah `v2.0.0`. Baseline stabil untuk production tetap
 `v1.0.0` sampai rilis baru secara resmi dinyatakan siap.
 
 ## Aturan Perencanaan

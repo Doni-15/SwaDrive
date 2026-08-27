@@ -19,20 +19,22 @@ implementasi mendatang tersedia dalam [README](../../README.md) utama.
   memakai fixed chunk persisten, penulisan yang diverifikasi, dan publikasi
   atomik.
 - [ADR-0005](ADR-0005-nvme-metadata-plane-and-hdd-content-plane.md): SQLite
-  melayani metadata plane, isi file pengguna tetap berada pada data filesystem,
-  dan celah mutasi yang diketahui ditangani secara fail-closed melalui durable
-  state.
+  melayani metadata plane, isi file pengguna tetap berada pada filesystem di
+  data disk, dan celah mutasi yang diketahui ditangani secara fail-closed
+  melalui durable state.
 - [ADR-0006](ADR-0006-process-coordination-and-storage-identity.md): proses yang
-  bekerja sama berkoordinasi melalui lock database kanonis dan mengikat operasi
-  pada identitas storage yang disediakan administrator.
+  bekerja sama berkoordinasi melalui process lock kanonis untuk database dan
+  mengikat operasi pada identitas storage yang disediakan administrator.
+- [ADR-0007](ADR-0007-swadrive-naming-and-legacy-production-identifiers.md):
+  SwaDrive adalah nama proyek saat ini, sedangkan identifier lama di production
+  dipertahankan jika risiko migrasi tidak sebanding dengan manfaat rename.
 
 ADR baru harus memuat status, konteks, keputusan, dan konsekuensi. Perubahan
 keputusan harus menggantikan ADR sebelumnya secara eksplisit, bukan menulis
 ulang riwayatnya secara diam-diam.
 
 Klarifikasi status implementasi dan correctness dapat memperbarui ADR yang
-telah diterima tanpa mengubah keputusannya. Penambahan Phase 2/2.1 pada ADR-0001
-sampai ADR-0005 mendokumentasikan perilaku yang telah diimplementasikan dan
-memperjelas konsekuensi sesuai batas yang diterima. Keputusan khusus mengenai
-koordinasi proses dan identitas storage dicatat terpisah sebagai ADR-0006,
-bukan disisipkan secara diam-diam ke dalam ADR sebelumnya.
+telah diterima tanpa mengubah keputusannya. Keputusan khusus mengenai koordinasi
+proses dan identitas storage dicatat terpisah sebagai ADR-0006, sedangkan
+keputusan penamaan proyek dan identifier lama di production dicatat sebagai
+ADR-0007.

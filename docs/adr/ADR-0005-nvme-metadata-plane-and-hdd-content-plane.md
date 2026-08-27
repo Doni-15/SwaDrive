@@ -5,17 +5,17 @@
 
 ## Konteks
 
-Target production SwaDrive memisahkan storage NVMe yang cepat dan selalu aktif
-dari HDD berkapasitas besar. Operasi seperti browsing directory, lookup
-metadata, pencarian nama atau path file, status upload, listing trash, session,
-dan riwayat audit merupakan pembacaan kecil yang sering dilakukan. Melakukan
+Deployment SwaDrive di production memisahkan storage NVMe yang cepat dan selalu
+aktif dari HDD berkapasitas besar. Operasi seperti browsing pada directory,
+lookup metadata, pencarian nama atau path file, status upload, listing trash,
+session, dan riwayat audit merupakan pembacaan kecil yang sering dilakukan. Melakukan
 tree walk atau stat pada filesystem pengguna untuk operasi tersebut akan
 membangunkan HDD dan mengubah navigasi biasa menjadi I/O acak pada data disk.
 
-Byte pada filesystem tetap otoritatif, sedangkan SQLite tidak dapat melakukan
-commit secara atomik bersama rename filesystem. Karena itu, tampilan metadata
-harus dapat dibangun ulang tanpa membuang tampilan lengkap terakhir jika
-rebuild oleh administrator terputus.
+Byte pada filesystem tetap menjadi sumber otoritatif, sedangkan SQLite tidak
+dapat melakukan commit secara atomik bersama rename filesystem. Karena itu,
+tampilan metadata harus dapat dibangun ulang tanpa membuang tampilan lengkap
+terakhir jika rebuild oleh administrator terputus.
 
 ## Keputusan
 
@@ -68,15 +68,16 @@ melakukan scan HDD secara umum.
 Mkdir dan move juga menyimpan mutation intent kecil yang menandai kondisi
 unhealthy sebelum tahap filesystem. Transaction index dan audit log yang
 berhasil menghapus intent yang sesuai; kegagalan yang berhasil dikompensasi
-secara aman menghapusnya setelah
-itu. Proses yang berhenti pada salah satu sisi batas filesystem dan SQLite
-membiarkan intent tetap durable. Setelah intent di-commit, finalisasi SQLite dan
-penghapusan intent memakai context singkat serta terbatas yang terpisah dari
+secara aman menghapusnya setelah itu. Proses yang berhenti pada salah satu sisi
+batas filesystem dan SQLite
+membiarkan intent tersimpan sebagai durable state. Setelah intent di-commit,
+finalisasi SQLite dan penghapusan intent memakai context singkat serta terbatas
+yang terpisah dari
 pembatalan request. Karena itu, client yang terputus saja tidak dapat
 meninggalkan operasi yang seharusnya sudah diperbaiki; kegagalan pada internal
-repair yang terbatas tetap membiarkan index unhealthy dan fail-closed. Targeted
-reconciliation untuk trash dan upload berjalan terlebih dahulu, lalu startup
-mensyaratkan index yang healthy sebelum melayani HTTP. Intent mkdir atau move
+repair yang terbatas tetap membiarkan index unhealthy dan fail-closed.
+Reconciliation terarah untuk trash dan upload berjalan terlebih dahulu, lalu
+startup mensyaratkan index yang healthy sebelum melayani HTTP. Intent mkdir atau move
 yang belum terselesaikan membuat startup fail-closed sampai administrator
 menjalankan reindex berbasis generation secara eksplisit. Intent mendeteksi
 ketidaksesuaian tanpa memindai HDD saat startup.

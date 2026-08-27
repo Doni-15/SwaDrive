@@ -1,27 +1,27 @@
 # SwaDrive
 
 SwaDrive adalah proyek pribadi untuk membangun private cloud sederhana yang
-dikelola sendiri. Backend Go berjalan pada storage server Linux dan diakses oleh
-client Flutter melalui tailnet privat, tanpa membuka layanan file ke internet
-publik.
+dikelola sendiri. Backend Go berjalan pada server Linux yang menangani storage
+dan diakses oleh client Flutter melalui tailnet privat, tanpa membuka layanan
+file ke internet publik.
 
 Proyek ini menjadi sarana untuk mempraktikkan administrasi Linux, networking,
 isolasi service, least privilege, Go, Flutter, dan secure software engineering.
-Backend untuk `v1.0.0` telah menjadi baseline production, sedangkan alur produk
+Backend `v1.0.0` telah menjadi baseline untuk production, sedangkan alur produk
 Flutter masih berupa scaffold dan belum diimplementasikan.
 
 ## Status Proyek
 
 | Area | Status | Bukti/status |
 | --- | --- | --- |
-| Fondasi HTTP backend Go | Selesai | Health endpoint dan test handler |
-| Fondasi service Linux | production | `systemd` dan service account terbatas |
-| Jaringan privat | production | Akses Tailscale dengan rule yang sempit |
-| Autentikasi aplikasi | Baseline production `v1.0.0` | Argon2id, server-side session berbasis opaque token, pencabutan, limiter, dan audit log |
-| File API | Baseline production `v1.0.0` | API berbasis logical path, metadata index SQLite, dan otorisasi owner |
-| Resumable transfer | Baseline production `v1.0.0` | Streaming berbasis fixed chunk, recovery setelah restart, dan publikasi atomik |
+| Fondasi HTTP backend Go | Production `v1.0.0` | Health endpoint dan test handler |
+| Fondasi service di Linux | Production `v1.0.0` | `systemd` dan service account terbatas |
+| Jaringan privat | Production `v1.0.0` | Akses Tailscale dengan rule akses yang ketat |
+| Autentikasi aplikasi | Production `v1.0.0` | Argon2id, server-side session berbasis opaque token, pencabutan, limiter, dan audit log |
+| File API | Production `v1.0.0` | API berbasis logical path, metadata index SQLite, dan otorisasi owner |
+| Resumable transfer | Production `v1.0.0` | Streaming berbasis fixed chunk, recovery setelah restart, dan publikasi atomik |
 | Client Flutter | Scaffold | Belum memiliki login atau file browser |
-| Deployment backend di production | Dirilis 2026-08-26 | Debian, `systemd`, metadata pada NVMe, isi file pada HDD, dan Tailscale |
+| Deployment backend | Production `v1.0.0` | Dirilis 2026-08-26 pada Debian dengan `systemd`, metadata pada NVMe, isi file pada HDD, dan Tailscale |
 
 ## Rilis
 
@@ -33,8 +33,11 @@ Ringkasan versi tersedia dalam [changelog](CHANGELOG.md). Source code backend
 untuk rilis `v1.0.0` dibekukan pada commit
 `accbe9223e2591fe7a88fe4652031f3bdfc529a9` sebagai baseline production.
 
-Proyek belum memiliki lisensi open source. Lihat [SECURITY.md](SECURITY.md)
-untuk pelaporan masalah keamanan.
+Repository dapat tersedia secara publik untuk portofolio dan transparansi.
+SwaDrive tetap merupakan proyek pribadi yang dikelola satu maintainer;
+kontribusi eksternal dan pull request tidak sedang diterima. Repository ini
+saat ini tidak menyediakan lisensi open source. Pelaporan kerentanan tetap
+ditangani secara terpisah melalui [kebijakan keamanan](SECURITY.md).
 
 Health endpoint yang tersedia saat ini:
 
@@ -74,7 +77,7 @@ file-sharing service, atau pengganti administrasi melalui SSH.
   metadata tanpa melakukan tree scan pada HDD dalam operasi normal;
 - audit log append-only untuk aktivitas autentikasi, session, file, dan upload;
 - command lokal bagi administrator untuk melakukan bootstrap owner, reindex
-  metadata, dan reconciliation terhadap orphan upload part.
+  metadata, dan melakukan reconciliation terhadap orphan upload part.
 
 Backend telah melewati unit test dan integration test, `go vet`, race test,
 build statis untuk Linux, serta vulnerability scan yang tidak menemukan
@@ -92,12 +95,12 @@ anggota tailnet biasa              anggota tailnet biasa
                     storage server
                     Debian/Linux
                           |
-                 Go API via systemd
+               Go API melalui systemd
                 service account terbatas
                     |             |
                NVMe/state        HDD/content
                  SQLite       files/uploads/trash
-         listing/search/meta     byte pengguna
+         listing/search/meta   isi file pengguna
 ```
 
 Empat lapisan identitas sengaja dipisahkan:
@@ -119,8 +122,8 @@ Penjelasan lebih lengkap tersedia dalam [arsitektur](docs/architecture.md) dan
 - backend tidak berjalan sebagai `root` atau akun administrator;
 - binary dan konfigurasi deployment tidak dapat ditulis oleh runtime service
   account;
-- client tidak membawa SSH private key dan tidak memakai SSH sebagai data
-  protocol;
+- client tidak membawa SSH private key dan tidak memakai SSH sebagai protokol
+  transfer data;
 - server hanya dapat dicapai melalui tailnet privat pada port aplikasi yang
   diperlukan;
 - File API memakai logical path yang divalidasi; physical path pada host bukan
@@ -130,8 +133,8 @@ Penjelasan lebih lengkap tersedia dalam [arsitektur](docs/architecture.md) dan
   dicatat dalam bentuk mentah;
 - upload yang belum selesai dipisahkan dari file yang sudah valid;
 - penghapusan normal diarahkan ke trash agar data dapat dipulihkan;
-- secret, database, backup, log, dan data pengguna production tidak boleh masuk
-  repository.
+- secret, database, backup, log, dan data pengguna di production tidak boleh
+  masuk repository.
 
 Invariant file API:
 
@@ -142,11 +145,12 @@ Invariant file API:
 
 ```text
 SwaDrive/
+├── CHANGELOG.md
 ├── client/                 scaffold Flutter untuk Linux dan Android
 ├── server/
 │   ├── cmd/server/
 │   ├── cmd/swadrive-admin/
-│   ├── internal/{auth,audit,database,files,httpapi,storage,uploads}/
+│   ├── internal/{admincli,audit,auth,config,database,files,httpapi,storage,uploads}/
 │   └── go.mod
 ├── docs/
 │   ├── architecture.md
@@ -192,15 +196,15 @@ SWADRIVE_MAX_CONCURRENT_DOWNLOADS=32
 ```
 
 Marker `.swadrive-volume` memverifikasi identitas yang diharapkan aplikasi,
-bukan membuktikan bahwa HDD benar-benar ter-mount. Deployment production tetap
-wajib memastikan mount, urutan, dan ownership melalui OS serta `systemd`.
+bukan membuktikan bahwa HDD benar-benar ter-mount. Deployment di production
+tetap wajib memastikan mount, urutan, dan ownership melalui OS serta `systemd`.
 Storage root yang ter-mount dan marker harus dikendalikan administrator,
-sedangkan `files/`, `uploads/`, dan `trash/` merupakan content boundary yang
+sedangkan `files/`, `uploads/`, dan `trash/` merupakan batas penyimpanan yang
 dapat ditulis service serta harus berada pada filesystem yang sama. Area state
 harus memungkinkan service membuat dan menulis file SQLite DB/WAL/SHM serta
-coordination lock. Flock mengoordinasikan proses SwaDrive yang bekerja sama,
-bukan melindungi dari writer berbahaya dengan UID yang sama. Tata letak
-permission yang tepat tetap menjadi keputusan deployment dan harus diuji.
+lock untuk koordinasi proses. Flock mengoordinasikan proses SwaDrive yang
+bekerja sama, bukan melindungi dari writer berbahaya dengan UID yang sama. Tata
+letak permission yang tepat tetap menjadi keputusan deployment dan harus diuji.
 
 Command administrasi lokal berikut bukan HTTP endpoint:
 
@@ -229,8 +233,8 @@ flutter analyze
 flutter run -d linux
 ```
 
-Client saat ini masih berupa scaffold. Tidak ada credential, alamat server
-production, atau identifier operasional privat yang disimpan dalam source.
+Client saat ini masih berupa scaffold. Tidak ada credential, alamat server di
+production, atau identifier operasional privat yang disimpan dalam source code.
 
 ## Dokumentasi
 
@@ -241,7 +245,9 @@ production, atau identifier operasional privat yang disimpan dalam source.
   diketahui.
 - [Architecture Decision Records](docs/adr/README.md) menyimpan keputusan
   arsitektur historis.
-- [Catatan rilis](docs/releases/README.md) memuat status dan provenance rilis.
+- [Changelog](CHANGELOG.md) memuat ringkasan perubahan secara kronologis.
+- [Catatan rilis](docs/releases/README.md) memuat detail dan provenance setiap
+  rilis.
 - [Kebijakan keamanan](SECURITY.md) menjelaskan pelaporan kerentanan.
 
 ## Roadmap
@@ -249,10 +255,6 @@ production, atau identifier operasional privat yang disimpan dalam source.
 Target major berikutnya adalah `v2.0.0`. Cakupan fiturnya belum ditetapkan
 sebagai komitmen dan hanya akan ditambahkan setelah keputusan implementasi
 disetujui. Lihat [penanda perencanaan `v2.0.0`](docs/releases/NEXT.md).
-
-Setiap endpoint yang dilindungi harus memiliki negative authorization test.
-Implementasi path file harus menguji traversal, symlink escape, conflict,
-permission failure, dan cancellation.
 
 ## Yang Saya Pelajari
 

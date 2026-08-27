@@ -15,30 +15,30 @@ kewenangan deployment, atau akses filesystem yang luas.
 Jalankan backend Go dengan service account khusus yang terbatas di Linux, bukan
 sebagai `root` atau akun administrator.
 
-Service account menggunakan shell noninteraktif, tidak memiliki sudo, login
-interaktif atau SSH, maupun kewenangan administrasi Tailscale. Akun ini hanya
-boleh menulis path storage, state, dan log aplikasi yang memerlukan mutasi saat
-runtime, serta membaca konfigurasi yang disediakan administrator sesuai
-kebutuhan.
+Service account menggunakan shell noninteraktif dan tidak memiliki akses sudo,
+login interaktif, akses SSH, maupun kewenangan administrasi Tailscale. Akun ini
+hanya boleh menulis pada path untuk storage, state, dan log aplikasi yang memang
+perlu diubah saat runtime, serta membaca konfigurasi yang disediakan
+administrator sesuai kebutuhan.
 
 Administrator memilih path state, tetapi runtime service account harus dapat
 membuat dan menulis file database, WAL, dan SHM SQLite di sana. Flock di samping
 database mengoordinasikan proses SwaDrive yang bekerja sama; mekanisme ini
-bukan batas keamanan terhadap proses berbahaya yang berjalan dengan UID sama
-atau pihak lain yang dapat mengganti file dalam area state yang dapat ditulis
-tersebut.
+bukan batas keamanan terhadap proses berbahaya yang berjalan dengan UID yang
+sama atau pihak lain yang dapat mengganti file dalam area state yang dapat
+ditulis tersebut.
 
 Storage root yang ter-mount dan marker `.swadrive-volume` tetap dikendalikan
 administrator serta tidak boleh dapat diganti oleh runtime service account.
 Subdirectory penyimpanan `files/`, `uploads/`, dan `trash/` yang telah disediakan
 sebelumnya merupakan batas data yang dapat ditulis service. Ownership, mode,
-urutan mount, dan rule writable path `systemd` yang tepat di production menjadi
-tanggung jawab deployment serta harus mendukung batas ini tanpa memberikan
-akses yang lebih luas.
+urutan mount, dan rule `systemd` untuk writable path yang tepat di production
+menjadi tanggung jawab deployment serta harus mendukung batas ini tanpa
+memberikan akses yang lebih luas.
 
 Binary yang digunakan di production tetap dimiliki administrator dalam
 directory rilis, sedangkan konfigurasi tetap dikendalikan administrator dalam
-directory konfigurasi yang terpisah. Runtime service account tidak boleh dapat
+directory konfigurasi terpisah. Runtime service account tidak boleh dapat
 mengganti executable untuk backend.
 
 ## Konsekuensi
@@ -47,10 +47,19 @@ mengganti executable untuk backend.
   lebih sempit.
 - Aktivitas administrator, instalasi rilis, dan runtime aplikasi tetap dapat
   diaudit sebagai kewenangan yang terpisah.
-- Ownership dan rule writable path `systemd` memerlukan pemeliharaan yang
+- Ownership dan rule `systemd` untuk writable path memerlukan pemeliharaan yang
   disengaja.
 - Kegagalan permission harus diperbaiki secara sempit; `chmod 777`, akses sudo,
   atau menjalankan service sebagai administrator bukan workaround yang dapat
   diterima.
 - Sandboxing `systemd` tambahan dapat diterapkan setelah service minimal
   berfungsi.
+
+## Alternatif yang Ditolak
+
+- Menjalankan backend sebagai `root` atau akun administrator ditolak karena
+  memperluas dampak kompromi dan menyatukan kewenangan runtime dengan
+  kewenangan administrasi.
+- Memberikan sudo, login interaktif, atau akses tulis terhadap binary dan
+  konfigurasi deployment ditolak karena melanggar batas service account yang
+  menjadi tujuan keputusan ini.

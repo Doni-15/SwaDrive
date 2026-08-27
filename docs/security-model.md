@@ -2,13 +2,14 @@
 
 Dokumen ini menjelaskan aset, trust boundary, identitas, kontrol keamanan, dan
 keterbatasan yang berlaku pada SwaDrive `v1.0.0`. Keputusan historis yang
-mendasarinya tetap dicatat dalam [ADR](adr/README.md).
+mendasarinya tetap dicatat dalam [ADR](adr/README.md). Jalur untuk melaporkan
+kerentanan dijelaskan terpisah dalam [kebijakan keamanan](../SECURITY.md).
 
 ## Aset yang Dilindungi
 
 - file pengguna dan metadata;
 - hash password dan session state;
-- raw bearer session token pada client;
+- raw bearer token untuk session pada client;
 - release artifact dan konfigurasi deployment;
 - akses administrator;
 - control plane untuk jaringan privat.
@@ -62,7 +63,7 @@ jaringan privat.
    bawah storage `os.Root` yang telah dikonfigurasi.
 4. Proses backend tidak boleh menulis binary, service unit, konfigurasi
    administrator, atau home directory milik administrator.
-5. Raw password, token, isi file, dan physical path internal pada host tidak
+5. Raw password, token, isi file, dan physical path internal di host tidak
    boleh dicatat dalam log.
 6. Client tidak menerima credential OS atau credential administrasi jaringan
    privat.
@@ -90,8 +91,14 @@ jaringan privat.
 - metadata reindex dengan pergantian generation yang aman dan unhealthy index
   yang fail-closed;
 - integritas chunk paralel, recovery saat startup untuk status `finalizing`,
-  dan kebijakan reconciliation orphan part oleh administrator;
+  dan kebijakan reconciliation terhadap orphan upload part oleh administrator;
 - database lock antarproses dan validasi marker volume.
+
+## Kebijakan Regression Test
+
+Setiap endpoint yang dilindungi harus memiliki negative authorization test.
+Implementasi path file harus menguji traversal, symlink escape, conflict,
+permission failure, dan cancellation.
 
 ## Kriptografi, Transport, dan Encryption at Rest
 
@@ -111,11 +118,11 @@ Hashing bukan encryption.
 
 ## Batas Resource dan Model Kegagalan
 
-Argon2 (default 4), upload chunks (8), downloads (32), dan login requests (64)
-memiliki process-local concurrency gates. Login request body dibatasi 64 KiB dan
-login-only read deadline 15 detik. Listing/search/audit pagination, upload count,
-chunk count/size, DB pool, startup reconciliation, dan admin orphan scan juga
-dibatasi.
+Argon2 (default 4), upload chunk (8), download (32), dan request login (64)
+masing-masing memiliki process-local concurrency gate. Request body untuk login
+dibatasi 64 KiB dengan read deadline khusus login selama 15 detik.
+Listing/search/audit pagination, upload count, chunk count/size, DB pool,
+startup reconciliation, dan admin orphan scan juga dibatasi.
 
 Audit API tetap append-only. `login_rate_limited` ditulis hanya ketika bucket
 akun/IP melintasi threshold, bukan pada setiap request yang sudah diblokir.
@@ -140,25 +147,25 @@ Kebijakan lifecycle backend `v1.0.0` adalah:
   berhasil;
 - audit event tetap append-only dan tidak dihapus secara otomatis.
 
-Dalam operasi production, budget ukuran database, alert 70%/85%, backup, dan
-jadwal archive offline tetap menjadi tanggung jawab operator. Target kebijakan
-yang masih harus ditinjau adalah memindahkan ke archive yang dikendalikan
-administrator: riwayat session dan upload berstatus terminal yang lebih tua
-dari 90 hari, serta audit yang lebih tua dari 365 hari. Pemindahan akan memakai
-maintenance command atau migration yang diuji terlebih dahulu. Retention
-tersebut belum diimplementasikan
-dalam source code `v1.0.0` karena penghapusan audit secara diam-diam akan
-mengubah semantik keamanan. Ini merupakan keterbatasan kapasitas production yang
-eksplisit, bukan klaim bahwa pertumbuhan SQLite berhenti selamanya.
+Penetapan budget ukuran database, alert 70%/85%, backup, dan jadwal pemindahan
+ke archive secara offline tetap menjadi tanggung jawab operator di production.
+Kebijakan yang masih harus ditinjau menargetkan pemindahan riwayat session dan
+upload berstatus terminal yang lebih tua dari 90 hari, serta audit yang lebih
+tua dari 365 hari, ke archive yang dikendalikan administrator. Pemindahan akan
+memakai maintenance command atau migration yang diuji terlebih dahulu.
+Retention tersebut belum diimplementasikan dalam source code `v1.0.0` karena
+penghapusan audit secara diam-diam akan mengubah semantik keamanan. Ini
+merupakan keterbatasan kapasitas di production yang eksplisit, bukan klaim bahwa
+pertumbuhan SQLite berhenti selamanya.
 
 Filesystem dan SQLite tidak diklaim atomik. State trash dan upload yang telah
-diketahui ditangani melalui targeted reconciliation. Durable unhealthy intent
-membuat crash pada mkdir atau move menjadi fail-closed sampai reindex eksplisit
-dilakukan. Setelah intent di-commit, pembatalan request bukan satu-satunya
-lifetime untuk finalisasi index dan audit log atau compensation cleanup:
-internal repair context yang terbatas menyelesaikannya, sedangkan kegagalan
-repair tetap fail-closed. Cleanup orphan part oleh administrator hanya memeriksa
-directory `uploads/` yang bersifat internal, menggunakan scan terbatas, serta
+diketahui ditangani melalui reconciliation terarah. Unhealthy intent yang
+disimpan secara durable membuat crash pada mkdir atau move menjadi fail-closed
+sampai reindex eksplisit dilakukan. Setelah intent di-commit, finalisasi index
+dan audit log maupun compensation cleanup tidak hanya bergantung pada lifetime
+request. Internal repair context yang terbatas menyelesaikannya, sedangkan
+kegagalan repair tetap fail-closed. Cleanup orphan part oleh administrator hanya
+memeriksa directory internal `uploads/`, menggunakan scan terbatas, serta
 mensyaratkan umur minimum, nama `.part` acak yang ketat, regular file, ketiadaan
 entry database, dan opsi `-apply` eksplisit; operasi ini tidak pernah
 memublikasikan file.
@@ -171,13 +178,14 @@ tidak melindungi dari `root` berbahaya, writer dengan UID yang sama, bind mount
 berbahaya, alias database melalui hard link, atau dua database berbeda yang
 mengarah ke satu root.
 
-Area state harus dapat ditulis untuk file SQLite DB/WAL/SHM dan coordination
-lock. Karena itu, flock bukan batas keamanan terhadap writer berbahaya dengan
-UID yang sama. Storage root yang ter-mount dan marker harus dikendalikan
-administrator, sedangkan `files/`, `uploads/`, dan `trash/` merupakan batas yang
-dapat ditulis service. Mode ownership yang tepat dan konfigurasi unit `systemd`
-bergantung pada deployment dan tidak dipublikasikan dalam repository.
+Area state harus dapat ditulis untuk file SQLite DB/WAL/SHM dan lock untuk
+koordinasi proses. Karena itu, flock bukan batas keamanan terhadap writer
+berbahaya dengan UID yang sama. Storage root yang ter-mount dan marker harus
+dikendalikan administrator, sedangkan `files/`, `uploads/`, dan `trash/`
+merupakan batas yang dapat ditulis service. Mode ownership yang tepat dan
+konfigurasi unit `systemd` bergantung pada deployment dan tidak dipublikasikan
+dalam repository.
 
 Content search, OCR, thumbnail, dan encryption at rest pada level aplikasi tidak
-tersedia. Backend menjadi baseline production `v1.0.0` pada 2026-08-26; client
-Flutter tetap berupa scaffold.
+tersedia. Backend `v1.0.0` menjadi baseline untuk production pada 2026-08-26;
+client Flutter tetap berupa scaffold.

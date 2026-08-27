@@ -5,7 +5,7 @@
 
 ## Konteks
 
-Tailscale menentukan perangkat yang dapat mencapai service jaringan privat
+Tailscale menentukan perangkat yang dapat mencapai service di jaringan privat
 SwaDrive, tetapi keterjangkauan jaringan tidak menetapkan akun aplikasi maupun
 memberikan otorisasi pada level aplikasi. SwaDrive juga memerlukan beberapa
 session perangkat yang dapat kedaluwarsa dan dicabut secara independen tanpa
@@ -22,11 +22,11 @@ Go menyediakan autentikasi dan otorisasi aplikasi secara independen dari
 Tailscale. Akun aplikasi SwaDrive disimpan dalam SQLite. Pada tahap awal tidak
 ada endpoint self-registration publik. Pembuatan owner awal diimplementasikan
 melalui command `bootstrap-owner` yang dikendalikan administrator lokal; apakah
-owner benar-benar telah disediakan di production tetap merupakan state
+owner benar-benar telah disediakan di production tetap bergantung pada state
 deployment. Model data tetap mendukung penambahan pengguna.
 
-Password di-hash dengan Argon2id dan disimpan dalam format encoded
-self-describing yang memuat versi algoritma, parameter, salt, dan derived hash.
+Password di-hash dengan Argon2id dan disimpan dalam format encoded yang
+self-describing serta memuat versi algoritma, parameter, salt, dan derived hash.
 Parameter serta verifikasi hashing password dipusatkan agar hash baru dapat
 memakai parameter yang ditingkatkan, sementara hash lama tetap dapat
 diverifikasi. Seluruh pekerjaan Argon2id melewati satu process-local gate
@@ -84,12 +84,12 @@ Keterjangkauan jaringannya tetap dibatasi oleh batas Tailscale privat.
 ## Konsekuensi
 
 - Kompromi terhadap keterjangkauan perangkat Tailscale saja tidak memberikan
-  identitas atau permission aplikasi.
+  identitas atau hak akses aplikasi.
 - Pengungkapan database tidak langsung memperlihatkan plaintext password atau
   bearer session token, meskipun hash password dan metadata session tetap
   sensitif terhadap keamanan.
-- Perangkat yang hilang atau tidak lagi dipercaya dapat dicabut secara
-  independen, dan satu pengguna dapat memakai beberapa perangkat secara
+- Session pada perangkat yang hilang atau tidak lagi dipercaya dapat dicabut
+  secara independen, dan satu pengguna dapat memakai beberapa perangkat secara
   concurrent.
 - Server harus melakukan lookup ke database untuk request yang dilindungi dan
   menerapkan rule masa berlaku, pencabutan, pengguna nonaktif, serta otorisasi.
