@@ -1,37 +1,39 @@
 ---
-name: Bug report
-about: Report reproducible incorrect behavior
+name: Laporan bug
+about: Laporkan perilaku salah yang dapat direproduksi
 title: "[BUG] "
 labels: bug
 ---
 
-## Summary
+## Ringkasan
 
-## Environment
+## Lingkungan
 
-- Component: server / Flutter Linux / Flutter Android / documentation
-- Server OS:
-- Client OS:
-- SwaDrive client revision/version:
-- SwaDrive server revision/version:
+- Komponen: server / Flutter Linux / Flutter Android / dokumentasi
+- OS server:
+- OS client:
+- Revisi/versi client SwaDrive:
+- Revisi/versi server SwaDrive:
 
-## Steps to Reproduce
+## Langkah Reproduksi
 
 1.
 2.
 3.
 
-## Expected Behavior
+## Perilaku yang Diharapkan
 
-## Actual Behavior
+## Perilaku Aktual
 
-## Logs
+## Log
 
-Paste only the relevant excerpt. Remove tokens, credentials, private paths,
-infrastructure details, and user data.
+Tempel hanya bagian yang relevan. Hapus token, credential, path yang bersifat
+privat, detail infrastruktur, dan data pengguna.
 
-## Security Impact
+## Dampak Keamanan
 
-Does this bug affect authentication, authorization, file access, or privilege boundaries?
+Apakah bug ini memengaruhi autentikasi, otorisasi, akses file, atau privilege
+boundary?
 
-Do not report exploitable vulnerabilities publicly. Follow `SECURITY.md`.
+Jangan melaporkan kerentanan yang dapat dieksploitasi secara publik. Ikuti
+[kebijakan keamanan](../../SECURITY.md).
