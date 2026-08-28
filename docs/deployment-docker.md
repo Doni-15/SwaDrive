@@ -22,6 +22,10 @@ Compose memakai dua bind mount yang wajib sudah ada:
 - state/SQLite pada `SWADRIVE_STATE_DIR`;
 - content root pada `SWADRIVE_STORAGE_DIR`.
 
+Keduanya memakai `bind.create_host_path: false`. Salah ketik atau directory host
+yang belum dibuat membuat Compose gagal sebelum container dijalankan; Compose
+tidak boleh membuat directory root-owned yang tidak diharapkan.
+
 Contoh berikut harus disesuaikan operator. UID/GID `65532` boleh diganti melalui
 mekanisme deployment terpisah jika host memakai identity mapping lain, tetapi
 container tidak boleh dijalankan sebagai root hanya untuk menghindari penataan
@@ -96,6 +100,13 @@ Untuk akses direct-tailnet, set `SWADRIVE_BIND_ADDRESS` ke alamat Tailscale host
 yang spesifik sebelum `docker compose up`; jangan gunakan `0.0.0.0` kecuali
 firewall deny-by-default dan seluruh interface exposure telah diaudit.
 `EXPOSE 8080` pada image tidak memublikasikan port dengan sendirinya.
+
+Untuk deployment native tanpa Compose, perhatikan perubahan upgrade `v1.0.2`:
+default listener berubah dari `:8080` menjadi `127.0.0.1:8080`. Operator yang
+sebelumnya bergantung pada default all-interface untuk akses direct-tailnet harus
+menetapkan `SWADRIVE_LISTEN_ADDRESS='<tailscale-ip>:8080'` secara eksplisit.
+Kontrak HTTP API tetap kompatibel; yang berubah adalah default konfigurasi
+deployment.
 
 Docker/Tailscale hanya menentukan reachability. Bearer authentication,
 authorization owner, validation, dan filesystem confinement tetap ditegakkan

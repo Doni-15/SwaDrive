@@ -19,9 +19,13 @@ services:
       - type: bind
         source: ${SWADRIVE_STATE_DIR:?set SWADRIVE_STATE_DIR}
         target: /var/lib/swadrive
+        bind:
+          create_host_path: false
       - type: bind
         source: ${SWADRIVE_STORAGE_DIR:?set SWADRIVE_STORAGE_DIR}
         target: /srv/swadrive
+        bind:
+          create_host_path: false
     ports:
       - "${SWADRIVE_BIND_ADDRESS:-127.0.0.1}:${SWADRIVE_HOST_PORT:-8080}:8080"
     security_opt:
