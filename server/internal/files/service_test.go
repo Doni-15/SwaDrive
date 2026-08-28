@@ -167,6 +167,40 @@ func TestMoveCancellationAfterStorageDoesNotStrandIntent(t *testing.T) {
 	}
 }
 
+func TestTrashAndRestoreCancellationAfterStorageKeepMetadataConsistent(t *testing.T) {
+	service, manager, db, identity, root := newFilesTestService(t)
+	writeVisibleFile(t, root, "cancelled-trash.txt", []byte("content"))
+	reindexFiles(t, db, manager)
+
+	trashContext, cancelTrash := context.WithCancel(context.Background())
+	service.storage = &cancelAfterMutationStorage{Storage: manager, cancelTrash: cancelTrash}
+	entry, err := service.Trash(trashContext, identity, "cancelled-trash.txt")
+	if err != nil {
+		t.Fatalf("Trash() error = %v", err)
+	}
+	if !errors.Is(trashContext.Err(), context.Canceled) {
+		t.Fatalf("trash request context error = %v; want context.Canceled", trashContext.Err())
+	}
+	if _, err := service.Metadata(context.Background(), identity, "cancelled-trash.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("trashed metadata error = %v; want storage.ErrNotFound", err)
+	}
+
+	restoreContext, cancelRestore := context.WithCancel(context.Background())
+	service.storage = &cancelAfterMutationStorage{Storage: manager, cancelRestore: cancelRestore}
+	if err := service.Restore(restoreContext, identity, entry.ID); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
+	if !errors.Is(restoreContext.Err(), context.Canceled) {
+		t.Fatalf("restore request context error = %v; want context.Canceled", restoreContext.Err())
+	}
+	if _, err := service.Metadata(context.Background(), identity, "cancelled-trash.txt"); err != nil {
+		t.Fatalf("restored metadata error = %v", err)
+	}
+	if pending, err := service.HasPendingReconciliation(context.Background()); err != nil || pending {
+		t.Fatalf("pending trash reconciliation = %t, %v; want false", pending, err)
+	}
+}
+
 func TestCancelledCreateDatabaseFailureCompensatesAndClearsIntent(t *testing.T) {
 	service, manager, db, identity, root := newFilesTestService(t)
 	installFileAuditFailureTrigger(t, db)
@@ -470,8 +504,28 @@ type moveCompensationFailureStorage struct {
 
 type cancelAfterMutationStorage struct {
 	Storage
-	cancelCreate context.CancelFunc
-	cancelMove   context.CancelFunc
+	cancelCreate  context.CancelFunc
+	cancelMove    context.CancelFunc
+	cancelTrash   context.CancelFunc
+	cancelRestore context.CancelFunc
+}
+
+func (storageManager *cancelAfterMutationStorage) MoveToTrash(source storage.Path, trashName string) error {
+	err := storageManager.Storage.MoveToTrash(source, trashName)
+	if err == nil && storageManager.cancelTrash != nil {
+		storageManager.cancelTrash()
+		storageManager.cancelTrash = nil
+	}
+	return err
+}
+
+func (storageManager *cancelAfterMutationStorage) RestoreFromTrash(trashName string, destination storage.Path) error {
+	err := storageManager.Storage.RestoreFromTrash(trashName, destination)
+	if err == nil && storageManager.cancelRestore != nil {
+		storageManager.cancelRestore()
+		storageManager.cancelRestore = nil
+	}
+	return err
 }
 
 func (storageManager *cancelAfterMutationStorage) CreateDirectory(path storage.Path) error {

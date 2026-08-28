@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -35,6 +38,44 @@ func TestHealthEndpointReportsStorageAvailability(t *testing.T) {
 				t.Fatalf("body = %q; want %q", got, test.body)
 			}
 		})
+	}
+}
+
+func TestReadinessEndpointChecksControlPlaneAndReportsStorage(t *testing.T) {
+	t.Run("ready while storage degraded", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/ready", nil)
+		rec := httptest.NewRecorder()
+		NewHandler(Dependencies{
+			Storage:   staticStorageAvailability(false),
+			Readiness: ReadinessFunc(func(context.Context) error { return nil }),
+		}).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"storage":"unavailable"`) {
+			t.Fatalf("ready response = %d %q", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("control plane unavailable", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/ready", nil)
+		rec := httptest.NewRecorder()
+		NewHandler(Dependencies{
+			Storage:   staticStorageAvailability(true),
+			Readiness: ReadinessFunc(func(context.Context) error { return errors.New("database unavailable") }),
+		}).ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"code":"not_ready"`) {
+			t.Fatalf("not-ready response = %d %q", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestMetadataGateFailsClosed(t *testing.T) {
+	handler := (&server{metadata: staticStorageAvailability(false), logger: slog.New(slog.DiscardHandler)}).requireMetadata(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("metadata handler ran while gate was closed")
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/files", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"code":"metadata_unavailable"`) {
+		t.Fatalf("metadata gate response = %d %q", rec.Code, rec.Body.String())
 	}
 }
 
@@ -104,10 +145,44 @@ func TestDuplicateSecurityHeadersAreRejected(t *testing.T) {
 
 type deadlineResponseRecorder struct {
 	*httptest.ResponseRecorder
-	deadlines []time.Time
+	deadlines      []time.Time
+	writeDeadlines []time.Time
 }
 
 func (recorder *deadlineResponseRecorder) SetReadDeadline(deadline time.Time) error {
 	recorder.deadlines = append(recorder.deadlines, deadline)
 	return nil
+}
+
+func (recorder *deadlineResponseRecorder) SetWriteDeadline(deadline time.Time) error {
+	recorder.writeDeadlines = append(recorder.writeDeadlines, deadline)
+	return nil
+}
+
+func TestRouteSpecificTransferDeadlinesAreInstalledAndCleared(t *testing.T) {
+	readRecorder := &deadlineResponseRecorder{ResponseRecorder: httptest.NewRecorder()}
+	clearRead, err := installReadDeadline(readRecorder, chunkBodyReadTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearRead()
+	if len(readRecorder.deadlines) != 2 || readRecorder.deadlines[0].IsZero() || !readRecorder.deadlines[1].IsZero() {
+		t.Fatalf("read deadlines = %v; want nonzero then cleared", readRecorder.deadlines)
+	}
+
+	writeRecorder := &deadlineResponseRecorder{ResponseRecorder: httptest.NewRecorder()}
+	writer, clearWrite, err := installWriteProgressDeadline(writeRecorder, downloadWriteIdleTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	clearWrite()
+	if len(writeRecorder.writeDeadlines) != 4 || writeRecorder.writeDeadlines[0].IsZero() || !writeRecorder.writeDeadlines[3].IsZero() {
+		t.Fatalf("write deadlines = %v; want initial, per-write refreshes, then cleared", writeRecorder.writeDeadlines)
+	}
 }

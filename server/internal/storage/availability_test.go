@@ -99,7 +99,10 @@ func TestProviderRuntimeLossNeverWritesFallbackAndRequiresRestartToRecover(t *te
 		t.Fatal(err)
 	}
 
-	if provider.Available() {
+	if !provider.Available() {
+		t.Fatal("cached provider status changed before the bounded probe interval")
+	}
+	if provider.Probe() {
 		t.Fatal("provider remained available after configured volume disappeared")
 	}
 	logicalPath, _ := ParsePath("must-not-exist", false)

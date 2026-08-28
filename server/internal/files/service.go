@@ -282,11 +282,20 @@ func (service *Service) Trash(ctx context.Context, identity auth.Identity, pathV
 		return TrashEntry{}, err
 	}
 	if err := service.storage.MoveToTrash(logicalPath, entry.TrashName); err != nil {
-		return TrashEntry{}, errors.Join(err, service.trash.AbortTrash(ctx, entry.UserID, entry.ID))
+		abortErr := service.runMutationRepair(ctx, func(repairContext context.Context) error {
+			return service.trash.AbortTrash(repairContext, entry.UserID, entry.ID)
+		})
+		return TrashEntry{}, errors.Join(err, abortErr)
 	}
-	if err := service.trash.CommitTrashWithAudit(ctx, entry.UserID, entry.ID, entry.UpdatedAt, service.event(identity, audit.EventFileTrashed, "trash_entry", entry.ID, logicalPath.String(), "", nil)); err != nil {
-		markErr := service.index.MarkUnhealthy(ctx, trashHealthReason(entry.ID), service.now().UTC())
-		return TrashEntry{}, errors.Join(err, markErr)
+	if err := service.runMutationRepair(ctx, func(repairContext context.Context) error {
+		commitErr := service.trash.CommitTrashWithAudit(repairContext, entry.UserID, entry.ID, entry.UpdatedAt, service.event(identity, audit.EventFileTrashed, "trash_entry", entry.ID, logicalPath.String(), "", nil))
+		if commitErr == nil {
+			return nil
+		}
+		markErr := service.index.MarkUnhealthy(repairContext, trashHealthReason(entry.ID), service.now().UTC())
+		return errors.Join(commitErr, markErr)
+	}); err != nil {
+		return TrashEntry{}, err
 	}
 	entry.State = TrashStateTrashed
 	return entry, nil
@@ -324,14 +333,32 @@ func (service *Service) Restore(ctx context.Context, identity auth.Identity, id 
 		return err
 	}
 	if err := service.storage.RestoreFromTrash(entry.TrashName, destination); err != nil {
-		return errors.Join(err, service.trash.RollbackRestore(ctx, identity.User.ID, id, now))
+		rollbackErr := service.runMutationRepair(ctx, func(repairContext context.Context) error {
+			return service.trash.RollbackRestore(repairContext, identity.User.ID, id, now)
+		})
+		return errors.Join(err, rollbackErr)
 	}
-	err = service.trash.FinishRestoreWithAudit(ctx, identity.User.ID, id, service.event(identity, audit.EventFileRestored, "trash_entry", entry.ID, entry.OriginalPath, "", nil))
-	if err != nil {
-		markErr := service.index.MarkUnhealthy(ctx, restoreHealthReason(entry.ID), service.now().UTC())
-		return errors.Join(err, markErr)
+	if err := service.runMutationRepair(ctx, func(repairContext context.Context) error {
+		finishErr := service.trash.FinishRestoreWithAudit(repairContext, identity.User.ID, id, service.event(identity, audit.EventFileRestored, "trash_entry", entry.ID, entry.OriginalPath, "", nil))
+		if finishErr == nil {
+			return nil
+		}
+		markErr := service.index.MarkUnhealthy(repairContext, restoreHealthReason(entry.ID), service.now().UTC())
+		return errors.Join(finishErr, markErr)
+	}); err != nil {
+		return err
 	}
 	return nil
+}
+
+// HasPendingReconciliation reports whether filesystem-backed trash state must
+// be reconciled before metadata can be treated as authoritative.
+func (service *Service) HasPendingReconciliation(ctx context.Context) (bool, error) {
+	entries, err := service.trash.ListReconciliation(ctx, 1)
+	if err != nil {
+		return false, err
+	}
+	return len(entries) != 0, nil
 }
 
 // ReconcileTrash resolves durable trash operations left between their

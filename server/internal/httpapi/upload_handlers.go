@@ -3,9 +3,12 @@ package httpapi
 import (
 	"encoding/hex"
 	"net/http"
+	"time"
 
 	"github.com/Doni-15/SwaDrive/server/internal/uploads"
 )
+
+const chunkBodyReadTimeout = 5 * time.Minute
 
 type uploadResponse struct {
 	ID             string         `json:"id"`
@@ -94,6 +97,14 @@ func (server *server) putUploadChunk(w http.ResponseWriter, request *http.Reques
 		return
 	}
 	request.Body = http.MaxBytesReader(w, request.Body, expectedSize)
+	clearDeadline, err := installReadDeadline(w, chunkBodyReadTimeout)
+	if err != nil {
+		server.logger.ErrorContext(request.Context(), "chunk read deadline unavailable", "request_id", requestID(request), "error_type", "read_deadline")
+		w.Header().Set("Retry-After", "1")
+		writeError(w, request, http.StatusServiceUnavailable, "server_busy", "The server could not accept the upload body.")
+		return
+	}
+	defer clearDeadline()
 	result, err := server.uploads.PutChunk(
 		request.Context(),
 		identity(request),

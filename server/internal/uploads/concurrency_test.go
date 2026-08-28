@@ -554,6 +554,67 @@ func TestUploadStatusDoesNotTouchStorageAndCancelledUploadIsNeverIndexed(t *test
 	}
 }
 
+func TestCompleteAndCancelRepairAfterRequestCancellation(t *testing.T) {
+	t.Run("complete", func(t *testing.T) {
+		environment := newUploadTestEnvironment(t, 1)
+		upload := environment.create(t, "cancelled-complete.bin", 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		environment.service.storage = &cancelAfterUploadMutationStorage{Storage: environment.manager, cancelFinalize: cancel}
+
+		completed, err := environment.service.Complete(ctx, environment.identity, upload.ID)
+		if err != nil || completed.Status != StatusCompleted {
+			t.Fatalf("Complete() = %s, %v; want completed", completed.Status, err)
+		}
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatalf("complete request context error = %v; want context.Canceled", ctx.Err())
+		}
+		emptyChecksum := sha256.Sum256(nil)
+		if !bytes.Equal(completed.WholeSHA256, emptyChecksum[:]) {
+			t.Fatalf("completed checksum = %x; want %x", completed.WholeSHA256, emptyChecksum)
+		}
+		if pending, err := environment.service.HasPendingFinalization(context.Background()); err != nil || pending {
+			t.Fatalf("pending finalization = %t, %v; want false", pending, err)
+		}
+	})
+
+	t.Run("cancel", func(t *testing.T) {
+		environment := newUploadTestEnvironment(t, 1)
+		upload := environment.create(t, "cancelled-cancel.bin", 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		environment.service.storage = &cancelAfterUploadMutationStorage{Storage: environment.manager, cancelRemove: cancel}
+
+		if err := environment.service.Cancel(ctx, environment.identity, upload.ID); err != nil {
+			t.Fatalf("Cancel() error = %v", err)
+		}
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatalf("cancel request context error = %v; want context.Canceled", ctx.Err())
+		}
+		cancelled, err := environment.service.Get(context.Background(), environment.identity, upload.ID)
+		if err != nil || cancelled.Status != StatusCancelled {
+			t.Fatalf("cancelled upload = %s, %v; want cancelled", cancelled.Status, err)
+		}
+	})
+}
+
+func TestCompletionRehashesStoredChunksWithoutClientWholeChecksum(t *testing.T) {
+	environment := newUploadTestEnvironment(t, 1)
+	content := []byte("original bytes")
+	upload := environment.create(t, "tampered.bin", int64(len(content)))
+	checksum := sha256.Sum256(content)
+	if _, err := environment.service.PutChunk(context.Background(), environment.identity, upload.ID, 0, bytes.NewReader(content), checksum[:]); err != nil {
+		t.Fatalf("PutChunk() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(environment.root, "uploads", upload.PartName), []byte("tampered bytes"), 0o600); err != nil {
+		t.Fatalf("tamper stored part: %v", err)
+	}
+	if _, err := environment.service.Complete(context.Background(), environment.identity, upload.ID); !errors.Is(err, ErrChecksumMismatch) {
+		t.Fatalf("Complete(tampered part) error = %v; want ErrChecksumMismatch", err)
+	}
+	if _, err := os.Stat(filepath.Join(environment.root, "files", upload.TargetPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("tampered destination exists: %v", err)
+	}
+}
+
 func TestRestartCleanupRepairsExpiredPendingUploadWithMissingPart(t *testing.T) {
 	environment := newUploadTestEnvironment(t, 1)
 	upload := environment.create(t, "missing-part-after-restart.bin", 0)
@@ -649,6 +710,30 @@ func newUploadTestEnvironment(t *testing.T, concurrentChunks int) uploadTestEnvi
 type failOnUploadStorage struct {
 	t     *testing.T
 	calls int
+}
+
+type cancelAfterUploadMutationStorage struct {
+	Storage
+	cancelFinalize context.CancelFunc
+	cancelRemove   context.CancelFunc
+}
+
+func (storageManager *cancelAfterUploadMutationStorage) FinalizePart(partName string, destination storage.Path) error {
+	err := storageManager.Storage.FinalizePart(partName, destination)
+	if err == nil && storageManager.cancelFinalize != nil {
+		storageManager.cancelFinalize()
+		storageManager.cancelFinalize = nil
+	}
+	return err
+}
+
+func (storageManager *cancelAfterUploadMutationStorage) RemovePart(partName string) error {
+	err := storageManager.Storage.RemovePart(partName)
+	if err == nil && storageManager.cancelRemove != nil {
+		storageManager.cancelRemove()
+		storageManager.cancelRemove = nil
+	}
+	return err
 }
 
 func (guard *failOnUploadStorage) called() error {

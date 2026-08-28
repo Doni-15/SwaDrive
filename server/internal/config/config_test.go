@@ -55,6 +55,9 @@ func TestLoadServerRequiresPathsAndParsesOverrides(t *testing.T) {
 	if configuration.ListenAddress != defaultListenAddress || configuration.StorageReserveBytes != uploads.DefaultReserveBytes || configuration.MaxConcurrentArgon2 != auth.DefaultArgon2Limit || configuration.MaxConcurrentChunks != uploads.DefaultConcurrentChunks || configuration.MaxConcurrentDownloads != files.DefaultConcurrentDownloads {
 		t.Fatalf("defaults = %+v; want listen and reserve defaults", configuration)
 	}
+	if configuration.ListenAddress != "127.0.0.1:8080" {
+		t.Fatalf("default listen address = %q; want loopback-only", configuration.ListenAddress)
+	}
 }
 
 func TestLoadServerRequiresStorageVolumeIdentity(t *testing.T) {

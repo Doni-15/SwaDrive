@@ -4,6 +4,7 @@ package admincli
 import (
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,18 +23,64 @@ type PasswordReader func(prompt string) (string, error)
 
 func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer, readPassword PasswordReader) error {
 	if len(arguments) == 0 {
-		return errors.New("usage: swadrive-admin <bootstrap-owner|reindex|reconcile-upload-parts> [options]")
+		return errors.New("usage: swadrive-admin <bootstrap-owner|set-owner-password|reindex|reconcile-upload-parts> [options]")
 	}
 	switch arguments[0] {
 	case "bootstrap-owner":
 		return bootstrapOwner(ctx, arguments[1:], stdout, stderr, readPassword)
+	case "set-owner-password":
+		return setOwnerPassword(ctx, arguments[1:], stdout, stderr, readPassword)
 	case "reindex":
 		return reindex(ctx, arguments[1:], stdout, stderr)
 	case "reconcile-upload-parts":
 		return reconcileUploadParts(ctx, arguments[1:], stdout, stderr)
 	default:
-		return errors.New("usage: swadrive-admin <bootstrap-owner|reindex|reconcile-upload-parts> [options]")
+		return errors.New("usage: swadrive-admin <bootstrap-owner|set-owner-password|reindex|reconcile-upload-parts> [options]")
 	}
+}
+
+func setOwnerPassword(ctx context.Context, arguments []string, stdout, stderr io.Writer, readPassword PasswordReader) error {
+	if readPassword == nil {
+		return errors.New("password reader is required")
+	}
+	flags := flag.NewFlagSet("set-owner-password", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	databasePath := flags.String("database", "", "SQLite database path")
+	username := flags.String("username", "", "owner username")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*databasePath) == "" || strings.TrimSpace(*username) == "" {
+		return errors.New("set-owner-password requires -database PATH and -username USERNAME")
+	}
+
+	processLock, err := database.AcquireProcessLock(*databasePath)
+	if err != nil {
+		return err
+	}
+	defer processLock.Close()
+	password, err := readConfirmedPassword(readPassword)
+	if err != nil {
+		return err
+	}
+	db, err := database.Open(ctx, *databasePath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := database.Migrate(ctx, db); err != nil {
+		return err
+	}
+	authService, err := newAuthService(db)
+	if err != nil {
+		return err
+	}
+	owner, revoked, err := authService.ResetOwnerCredentials(ctx, *username, password)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "Owner %q password updated; %d session(s) revoked.\n", owner.Username, revoked)
+	return err
 }
 
 func reconcileUploadParts(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
@@ -109,16 +156,9 @@ func bootstrapOwner(ctx context.Context, arguments []string, stdout, stderr io.W
 	}
 	defer processLock.Close()
 
-	password, err := readPassword("Password: ")
+	password, err := readConfirmedPassword(readPassword)
 	if err != nil {
-		return fmt.Errorf("read password: %w", err)
-	}
-	confirmation, err := readPassword("Confirm password: ")
-	if err != nil {
-		return fmt.Errorf("read password confirmation: %w", err)
-	}
-	if subtle.ConstantTimeCompare([]byte(password), []byte(confirmation)) != 1 {
-		return errors.New("password confirmation does not match")
+		return err
 	}
 
 	db, err := database.Open(ctx, *databasePath)
@@ -130,18 +170,7 @@ func bootstrapOwner(ctx context.Context, arguments []string, stdout, stderr io.W
 		return err
 	}
 
-	auditService := audit.NewService(audit.NewSQLiteRepository(db), nil)
-	passwordManager, err := auth.NewPasswordManager(auth.DefaultArgon2Limit)
-	if err != nil {
-		return err
-	}
-	authService, err := auth.NewService(
-		auth.NewSQLiteRepository(db),
-		auditService,
-		auth.NewLoginLimiter(auth.DefaultLimiterEntries),
-		passwordManager,
-		nil,
-	)
+	authService, err := newAuthService(db)
 	if err != nil {
 		return err
 	}
@@ -151,6 +180,36 @@ func bootstrapOwner(ctx context.Context, arguments []string, stdout, stderr io.W
 	}
 	_, err = fmt.Fprintf(stdout, "Owner %q created.\n", owner.Username)
 	return err
+}
+
+func readConfirmedPassword(readPassword PasswordReader) (string, error) {
+	password, err := readPassword("Password: ")
+	if err != nil {
+		return "", fmt.Errorf("read password: %w", err)
+	}
+	confirmation, err := readPassword("Confirm password: ")
+	if err != nil {
+		return "", fmt.Errorf("read password confirmation: %w", err)
+	}
+	if subtle.ConstantTimeCompare([]byte(password), []byte(confirmation)) != 1 {
+		return "", errors.New("password confirmation does not match")
+	}
+	return password, nil
+}
+
+func newAuthService(db *sql.DB) (*auth.Service, error) {
+	auditService := audit.NewService(audit.NewSQLiteRepository(db), nil)
+	passwordManager, err := auth.NewPasswordManager(auth.DefaultArgon2Limit)
+	if err != nil {
+		return nil, err
+	}
+	return auth.NewService(
+		auth.NewSQLiteRepository(db),
+		auditService,
+		auth.NewLoginLimiter(auth.DefaultLimiterEntries),
+		passwordManager,
+		nil,
+	)
 }
 
 func reindex(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {

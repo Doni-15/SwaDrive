@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -19,7 +20,10 @@ import (
 	"github.com/Doni-15/SwaDrive/server/internal/uploads"
 )
 
-const maximumJSONBodyBytes int64 = 64 << 10
+const (
+	maximumJSONBodyBytes int64 = 64 << 10
+	jsonBodyReadTimeout        = 30 * time.Second
+)
 
 var errUnsupportedMediaType = errors.New("unsupported media type")
 
@@ -48,6 +52,15 @@ func writeError(w http.ResponseWriter, request *http.Request, status int, code, 
 }
 
 func decodeJSON(w http.ResponseWriter, request *http.Request, destination any) error {
+	clearDeadline, err := installReadDeadline(w, jsonBodyReadTimeout)
+	if err != nil {
+		return err
+	}
+	defer clearDeadline()
+	return decodeJSONPayload(w, request, destination)
+}
+
+func decodeJSONPayload(w http.ResponseWriter, request *http.Request, destination any) error {
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil || !strings.EqualFold(mediaType, "application/json") {
 		return errUnsupportedMediaType
@@ -74,6 +87,17 @@ func decodeJSON(w http.ResponseWriter, request *http.Request, destination any) e
 		return err
 	}
 	return nil
+}
+
+func installReadDeadline(w http.ResponseWriter, timeout time.Duration) (func(), error) {
+	controller := http.NewResponseController(w)
+	if err := controller.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		if errors.Is(err, http.ErrNotSupported) {
+			return func() {}, nil
+		}
+		return nil, fmt.Errorf("set request read deadline: %w", err)
+	}
+	return func() { _ = controller.SetReadDeadline(time.Time{}) }, nil
 }
 
 func writeDecodeError(w http.ResponseWriter, request *http.Request, err error) {

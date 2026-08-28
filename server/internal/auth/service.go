@@ -107,6 +107,27 @@ func (service *Service) BootstrapOwner(ctx context.Context, username, password, 
 	return user, nil
 }
 
+func (service *Service) ResetOwnerCredentials(ctx context.Context, username, password string) (User, int64, error) {
+	canonicalUsername, err := CanonicalizeUsername(username)
+	if err != nil {
+		return User{}, 0, err
+	}
+	if err := ValidateNewPassword(password); err != nil {
+		return User{}, 0, err
+	}
+	passwordHash, err := service.passwords.Hash(ctx, password)
+	if err != nil {
+		return User{}, 0, err
+	}
+	now := service.now().UTC()
+	return service.repository.ResetOwnerCredentialsWithAudit(ctx, canonicalUsername, passwordHash, now, audit.Event{
+		OccurredAt:   now,
+		Type:         audit.EventOwnerCredentialsReset,
+		Outcome:      audit.OutcomeSuccess,
+		ResourceType: "user",
+	})
+}
+
 func (service *Service) Login(ctx context.Context, input LoginInput) (LoginResult, error) {
 	clientName, err := canonicalizeClientName(input.ClientName)
 	if err != nil {

@@ -91,6 +91,59 @@ func (repository *SQLiteRepository) CreateInitialOwnerWithAudit(ctx context.Cont
 	return user, nil
 }
 
+func (repository *SQLiteRepository) ResetOwnerCredentialsWithAudit(ctx context.Context, username, passwordHash string, now time.Time, event audit.Event) (User, int64, error) {
+	tx, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, 0, fmt.Errorf("begin owner credential reset: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var user User
+	var role string
+	var createdAt, updatedAt int64
+	var disabledAt sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT id, username, role, created_at, updated_at, disabled_at
+		FROM users
+		WHERE username = ? AND role = 'owner'
+	`, username).Scan(&user.ID, &user.Username, &role, &createdAt, &updatedAt, &disabledAt); errors.Is(err, sql.ErrNoRows) {
+		return User{}, 0, ErrUserNotFound
+	} else if err != nil {
+		return User{}, 0, fmt.Errorf("find owner for credential reset: %w", err)
+	}
+
+	timestamp := now.UTC().Unix()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?
+	`, passwordHash, timestamp, user.ID); err != nil {
+		return User{}, 0, fmt.Errorf("update owner password: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE sessions SET revoked_at = ?
+		WHERE user_id = ? AND revoked_at IS NULL
+	`, timestamp, user.ID)
+	if err != nil {
+		return User{}, 0, fmt.Errorf("revoke owner sessions: %w", err)
+	}
+	revoked, err := result.RowsAffected()
+	if err != nil {
+		return User{}, 0, fmt.Errorf("read revoked owner sessions: %w", err)
+	}
+
+	user.Role = Role(role)
+	user.CreatedAt = time.Unix(createdAt, 0).UTC()
+	user.UpdatedAt = now.UTC()
+	user.DisabledAt = nullableTime(disabledAt)
+	event.ResourceID = strconv.FormatInt(user.ID, 10)
+	if _, err := repository.audit.AppendInTransaction(ctx, tx, event); err != nil {
+		return User{}, 0, fmt.Errorf("append owner credential reset audit event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, 0, fmt.Errorf("commit owner credential reset: %w", err)
+	}
+	return user, revoked, nil
+}
+
 func (repository *SQLiteRepository) CreateSessionWithAudit(
 	ctx context.Context,
 	userID int64,

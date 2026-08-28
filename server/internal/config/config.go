@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	defaultListenAddress   = ":8080"
+	defaultListenAddress   = "127.0.0.1:8080"
 	defaultCleanupInterval = 15 * time.Minute
 )
 

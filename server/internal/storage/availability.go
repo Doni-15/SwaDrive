@@ -5,7 +5,10 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+const availabilityProbeInterval = 5 * time.Second
 
 // Provider keeps content access behind a verified storage identity. A provider
 // can transition from available to unavailable at runtime, but deliberately
@@ -17,6 +20,8 @@ type Provider struct {
 	available        atomic.Bool
 	onStateChange    func(bool)
 	mutationMu       sync.Mutex
+	probeMu          sync.Mutex
+	lastProbe        time.Time
 }
 
 // OpenProvider returns an unavailable provider rather than failing when the
@@ -34,6 +39,7 @@ func OpenProvider(rootPath, expectedVolumeID string, onStateChange func(bool)) *
 	}
 	if err == nil {
 		provider.available.Store(true)
+		provider.lastProbe = time.Now()
 	}
 	provider.notify(provider.available.Load())
 	return provider
@@ -42,6 +48,36 @@ func OpenProvider(rootPath, expectedVolumeID string, onStateChange func(bool)) *
 // Available probes all storage invariants while the provider remains active.
 // Once a probe fails, the provider remains unavailable until process restart.
 func (provider *Provider) Available() bool {
+	if !provider.available.Load() {
+		return false
+	}
+	provider.probeMu.Lock()
+	defer provider.probeMu.Unlock()
+	if time.Since(provider.lastProbe) < availabilityProbeInterval {
+		return true
+	}
+	provider.lastProbe = time.Now()
+	manager, err := provider.storageManager()
+	if err != nil {
+		return false
+	}
+	if err := manager.Close(); err != nil {
+		provider.markUnavailable()
+		return false
+	}
+	return provider.available.Load()
+}
+
+// Probe bypasses the health-probe cache. Content operations validate storage
+// independently; this method is intended for explicit operational checks and
+// deterministic tests.
+func (provider *Provider) Probe() bool {
+	if !provider.available.Load() {
+		return false
+	}
+	provider.probeMu.Lock()
+	defer provider.probeMu.Unlock()
+	provider.lastProbe = time.Now()
 	manager, err := provider.storageManager()
 	if err != nil {
 		return false

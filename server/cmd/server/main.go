@@ -23,6 +23,11 @@ import (
 
 const maximumHTTPHeaderBytes = 64 << 10
 
+const (
+	serverReadTimeout  = 30 * time.Second
+	serverWriteTimeout = 30 * time.Second
+)
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -97,7 +102,8 @@ func run(parentContext context.Context, configuration config.Server, logger *slo
 	fileIndexRepository := files.NewSQLiteFileIndexRepository(db)
 	filesService := files.NewService(storageProvider, files.NewSQLiteTrashRepository(db), fileIndexRepository, mutationCoordinator, auditService, configuration.MaxConcurrentDownloads, nil)
 	uploadService := uploads.NewService(uploads.NewSQLiteRepository(db), storageProvider, mutationCoordinator, auditService, configuration.StorageReserveBytes, configuration.MaxConcurrentChunks, nil)
-	if err := reconcileAvailableStorage(ctx, storageProvider, filesService, uploadService, fileIndexRepository); err != nil {
+	metadataAvailable, err := reconcileAvailableStorage(ctx, storageProvider, filesService, uploadService, fileIndexRepository)
+	if err != nil {
 		return err
 	}
 
@@ -107,12 +113,26 @@ func run(parentContext context.Context, configuration config.Server, logger *slo
 		Files:   filesService,
 		Uploads: uploadService,
 		Storage: storageProvider,
-		Logger:  logger,
+		Metadata: httpapi.AvailabilityFunc(func() bool {
+			return metadataAvailable
+		}),
+		Readiness: httpapi.ReadinessFunc(func(readinessContext context.Context) error {
+			if err := db.PingContext(readinessContext); err != nil {
+				return err
+			}
+			if !metadataAvailable {
+				return files.ErrIndexInconsistent
+			}
+			return fileIndexRepository.CheckHealthy(readinessContext)
+		}),
+		Logger: logger,
 	})
 	server := &http.Server{
 		Addr:              configuration.ListenAddress,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       serverReadTimeout,
+		WriteTimeout:      serverWriteTimeout,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    maximumHTTPHeaderBytes,
 	}
@@ -163,30 +183,44 @@ func reconcileAvailableStorage(
 	filesService *files.Service,
 	uploadService *uploads.Service,
 	fileIndexRepository *files.SQLiteFileIndexRepository,
-) error {
+) (bool, error) {
 	if !storageProvider.Available() {
-		return nil
+		trashPending, err := filesService.HasPendingReconciliation(ctx)
+		if err != nil {
+			return false, err
+		}
+		uploadPending, err := uploadService.HasPendingFinalization(ctx)
+		if err != nil {
+			return false, err
+		}
+		if trashPending || uploadPending {
+			return false, nil
+		}
+		if err := fileIndexRepository.CheckHealthy(ctx); err != nil {
+			return false, errors.Join(files.ErrIndexInconsistent, err)
+		}
+		return true, nil
 	}
 	if _, err := filesService.ReconcileTrash(ctx); err != nil {
 		if errors.Is(err, storage.ErrUnavailable) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	if !storageProvider.Available() {
-		return nil
+		return false, nil
 	}
 	if _, err := uploadService.ReconcileFinalizing(ctx); err != nil {
 		if errors.Is(err, storage.ErrUnavailable) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	if !storageProvider.Available() {
-		return nil
+		return false, nil
 	}
 	if err := fileIndexRepository.CheckHealthy(ctx); err != nil {
-		return errors.Join(files.ErrIndexInconsistent, err)
+		return false, errors.Join(files.ErrIndexInconsistent, err)
 	}
-	return nil
+	return true, nil
 }

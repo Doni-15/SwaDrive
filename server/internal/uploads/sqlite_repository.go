@@ -111,7 +111,7 @@ func (repository *SQLiteRepository) FindChunk(ctx context.Context, uploadID stri
 	return chunk, nil
 }
 
-func (repository *SQLiteRepository) ValidateChunks(ctx context.Context, upload Upload) error {
+func (repository *SQLiteRepository) ValidateChunks(ctx context.Context, upload Upload, validateStoredChunk func(Chunk) error) error {
 	rows, err := repository.db.QueryContext(ctx, `
 		SELECT upload_id, chunk_index, byte_offset, byte_size, sha256, received_at
 		FROM upload_chunks
@@ -136,6 +136,11 @@ func (repository *SQLiteRepository) ValidateChunks(ctx context.Context, upload U
 		offset, expectedSize, boundsErr := chunkBounds(upload, index)
 		if boundsErr != nil || chunk.UploadID != upload.ID || chunk.Index != index || chunk.Offset != offset || chunk.Size != expectedSize || len(chunk.SHA256) != 32 {
 			return ErrMissingChunks
+		}
+		if validateStoredChunk != nil {
+			if err := validateStoredChunk(chunk); err != nil {
+				return err
+			}
 		}
 		index++
 	}
@@ -179,6 +184,18 @@ func (repository *SQLiteRepository) RecordChunk(ctx context.Context, chunk Chunk
 	return nil
 }
 
+func (repository *SQLiteRepository) PrepareFinalization(ctx context.Context, userID int64, id string, from Status, wholeSHA256 []byte, updatedAt time.Time) error {
+	result, err := repository.db.ExecContext(ctx, `
+		UPDATE uploads
+		SET status = 'finalizing', whole_sha256 = ?, updated_at = ?
+		WHERE id = ? AND user_id = ? AND status = ?
+	`, wholeSHA256, updatedAt.UTC().Unix(), id, userID, from)
+	if err != nil {
+		return fmt.Errorf("prepare upload finalization: %w", err)
+	}
+	return requireChangedUpload(result)
+}
+
 func (repository *SQLiteRepository) TransitionStatus(ctx context.Context, userID int64, id string, from, to Status, updatedAt time.Time) error {
 	result, err := repository.db.ExecContext(ctx, `
 		UPDATE uploads SET status = ?, updated_at = ?
@@ -201,9 +218,9 @@ func (repository *SQLiteRepository) CompleteWithAudit(ctx context.Context, userI
 		return fmt.Errorf("index completed upload: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `
-		UPDATE uploads SET status = 'completed', updated_at = ?
+		UPDATE uploads SET status = 'completed', whole_sha256 = ?, updated_at = ?
 		WHERE id = ? AND user_id = ? AND status = 'finalizing'
-	`, updatedAt.UTC().Unix(), id, userID)
+	`, entry.WholeSHA256, updatedAt.UTC().Unix(), id, userID)
 	if err != nil {
 		return fmt.Errorf("complete upload: %w", err)
 	}

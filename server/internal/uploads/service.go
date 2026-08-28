@@ -23,6 +23,7 @@ const (
 	cleanupBatchSize             = 100
 	finalizingReconcileBatchSize = 100
 	maximumFinalizingReconcile   = 1000
+	consistencyRepairTimeout     = 10 * time.Second
 )
 
 type Storage interface {
@@ -305,20 +306,26 @@ func (service *Service) Complete(ctx context.Context, identity auth.Identity, id
 		}
 		if !state.PartExists && state.DestinationExists {
 			now := service.now().UTC()
-			if err := service.validatePublishedState(ctx, upload, state, now); err != nil {
-				return Upload{}, err
-			}
-			if err := service.completePublished(ctx, upload, identity, state.DestinationModifiedAt, now, nil); err != nil {
-				return Upload{}, err
-			}
-			return service.repository.Find(ctx, upload.UserID, upload.ID)
+			var completed Upload
+			err := service.runConsistencyRepair(ctx, func(repairContext context.Context) error {
+				if err := service.validatePublishedState(repairContext, upload, state, now); err != nil {
+					return err
+				}
+				if err := service.completePublished(repairContext, upload, identity, state.DestinationModifiedAt, now, nil); err != nil {
+					return err
+				}
+				var findErr error
+				completed, findErr = service.repository.Find(repairContext, upload.UserID, upload.ID)
+				return findErr
+			})
+			return completed, err
 		}
 		if !state.PartExists || state.DestinationExists {
 			return Upload{}, ErrUploadState
 		}
 	}
 
-	if err := service.repository.ValidateChunks(ctx, upload); err != nil {
+	if err := service.repository.ValidateChunks(ctx, upload, nil); err != nil {
 		return Upload{}, err
 	}
 	partInfo, err := service.storage.PartInfo(upload.PartName)
@@ -328,28 +335,36 @@ func (service *Service) Complete(ctx context.Context, identity auth.Identity, id
 	if partInfo.Size() != upload.TotalSize {
 		return Upload{}, errors.Join(ErrChunkLength, service.recordSecurityFailure(ctx, identity, upload.ID, "part_size"))
 	}
-	if err := service.verifyAndSyncPart(ctx, upload); err != nil {
+	wholeSHA256, err := service.verifyAndSyncPart(ctx, upload)
+	if err != nil {
 		return Upload{}, errors.Join(err, service.recordSecurityFailure(ctx, identity, upload.ID, "whole_file_integrity"))
 	}
+	upload.WholeSHA256 = wholeSHA256
 
 	now := service.now().UTC()
-	transitioned := false
-	if upload.Status == StatusPending {
-		if err := service.repository.TransitionStatus(ctx, upload.UserID, upload.ID, StatusPending, StatusFinalizing, now); err != nil {
-			return Upload{}, err
-		}
-		transitioned = true
+	transitioned := upload.Status == StatusPending
+	if err := service.repository.PrepareFinalization(ctx, upload.UserID, upload.ID, upload.Status, wholeSHA256, now); err != nil {
+		return Upload{}, err
 	}
 	if err := service.storage.FinalizePart(upload.PartName, destination); err != nil {
+		var rollbackErr error
 		if transitioned {
-			_ = service.repository.TransitionStatus(ctx, upload.UserID, upload.ID, StatusFinalizing, StatusPending, now)
+			rollbackErr = service.runConsistencyRepair(ctx, func(repairContext context.Context) error {
+				return service.repository.ResetFinalizing(repairContext, upload.UserID, upload.ID, now)
+			})
 		}
-		return Upload{}, err
+		return Upload{}, errors.Join(err, rollbackErr)
 	}
-	if err := service.completePublished(ctx, upload, identity, partInfo.ModTime().UTC(), now, nil); err != nil {
-		return Upload{}, err
-	}
-	return service.repository.Find(ctx, upload.UserID, upload.ID)
+	var completed Upload
+	err = service.runConsistencyRepair(ctx, func(repairContext context.Context) error {
+		if err := service.completePublished(repairContext, upload, identity, partInfo.ModTime().UTC(), now, nil); err != nil {
+			return err
+		}
+		var findErr error
+		completed, findErr = service.repository.Find(repairContext, upload.UserID, upload.ID)
+		return findErr
+	})
+	return completed, err
 }
 
 func (service *Service) Cancel(ctx context.Context, identity auth.Identity, id string) error {
@@ -373,7 +388,9 @@ func (service *Service) Cancel(ctx context.Context, identity auth.Identity, id s
 		return err
 	}
 	now := service.now().UTC()
-	return service.repository.CancelWithAudit(ctx, upload.UserID, upload.ID, now, service.event(identity, upload.ID, upload.TargetPath, audit.EventUploadCancelled, audit.OutcomeSuccess, nil))
+	return service.runConsistencyRepair(ctx, func(repairContext context.Context) error {
+		return service.repository.CancelWithAudit(repairContext, upload.UserID, upload.ID, now, service.event(identity, upload.ID, upload.TargetPath, audit.EventUploadCancelled, audit.OutcomeSuccess, nil))
+	})
 }
 
 func (service *Service) CleanupExpired(ctx context.Context) (int, error) {
@@ -394,15 +411,17 @@ func (service *Service) CleanupExpired(ctx context.Context) (int, error) {
 			findErr = service.storage.RemovePart(upload.PartName)
 			if findErr == nil {
 				actorUserID := upload.UserID
-				findErr = service.repository.ExpireWithAudit(ctx, upload.UserID, upload.ID, now, audit.Event{
-					OccurredAt:   now,
-					ActorUserID:  &actorUserID,
-					Type:         audit.EventUploadCancelled,
-					Outcome:      audit.OutcomeSuccess,
-					ResourceType: "upload",
-					ResourceID:   upload.ID,
-					ResourcePath: upload.TargetPath,
-					Metadata:     map[string]string{"reason_code": "expired"},
+				findErr = service.runConsistencyRepair(ctx, func(repairContext context.Context) error {
+					return service.repository.ExpireWithAudit(repairContext, upload.UserID, upload.ID, now, audit.Event{
+						OccurredAt:   now,
+						ActorUserID:  &actorUserID,
+						Type:         audit.EventUploadCancelled,
+						Outcome:      audit.OutcomeSuccess,
+						ResourceType: "upload",
+						ResourceID:   upload.ID,
+						ResourcePath: upload.TargetPath,
+						Metadata:     map[string]string{"reason_code": "expired"},
+					})
 				})
 			}
 			didClean = findErr == nil
@@ -490,6 +509,16 @@ func (service *Service) ReconcileFinalizing(ctx context.Context) (int, error) {
 	return reconciled, nil
 }
 
+// HasPendingFinalization reports whether a published or partially published
+// upload must be reconciled before metadata can be treated as authoritative.
+func (service *Service) HasPendingFinalization(ctx context.Context) (bool, error) {
+	uploads, err := service.repository.ListFinalizing(ctx, 1)
+	if err != nil {
+		return false, err
+	}
+	return len(uploads) != 0, nil
+}
+
 func (service *Service) reconcileFinalizingUpload(ctx context.Context, candidate Upload) error {
 	unlockMutation := service.mutations.Lock()
 	defer unlockMutation()
@@ -569,39 +598,43 @@ func (service *Service) RunCleanup(ctx context.Context, interval time.Duration) 
 	}
 }
 
-func (service *Service) verifyAndSyncPart(ctx context.Context, upload Upload) error {
+func (service *Service) verifyAndSyncPart(ctx context.Context, upload Upload) ([]byte, error) {
 	partFile, err := service.storage.OpenPart(upload.PartName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer partFile.Close()
 
-	if len(upload.WholeSHA256) == sha256.Size {
-		hasher := sha256.New()
-		buffer := make([]byte, 128*1024)
-		for {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			count, readErr := partFile.Read(buffer)
-			if count > 0 {
-				_, _ = hasher.Write(buffer[:count])
-			}
-			if errors.Is(readErr, io.EOF) {
-				break
-			}
-			if readErr != nil {
-				return fmt.Errorf("hash upload part: %w", readErr)
-			}
+	wholeHasher := sha256.New()
+	buffer := make([]byte, 128*1024)
+	if err := service.repository.ValidateChunks(ctx, upload, func(chunk Chunk) error {
+		chunkHasher := sha256.New()
+		section := io.NewSectionReader(partFile, chunk.Offset, chunk.Size)
+		written, err := io.CopyBuffer(io.MultiWriter(wholeHasher, chunkHasher), &contextReader{ctx: ctx, reader: section}, buffer)
+		if err != nil {
+			return fmt.Errorf("hash stored upload chunk: %w", err)
 		}
-		if subtle.ConstantTimeCompare(hasher.Sum(nil), upload.WholeSHA256) != 1 {
+		if written != chunk.Size || subtle.ConstantTimeCompare(chunkHasher.Sum(nil), chunk.SHA256) != 1 {
 			return ErrChecksumMismatch
 		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	computedChecksum := wholeHasher.Sum(nil)
+	if len(upload.WholeSHA256) == sha256.Size && subtle.ConstantTimeCompare(computedChecksum, upload.WholeSHA256) != 1 {
+		return nil, ErrChecksumMismatch
 	}
 	if err := partFile.Sync(); err != nil {
-		return fmt.Errorf("sync upload part: %w", err)
+		return nil, fmt.Errorf("sync upload part: %w", err)
 	}
-	return nil
+	return computedChecksum, nil
+}
+
+func (service *Service) runConsistencyRepair(requestContext context.Context, repair func(context.Context) error) error {
+	repairContext, cancel := context.WithTimeout(context.WithoutCancel(requestContext), consistencyRepairTimeout)
+	defer cancel()
+	return repair(repairContext)
 }
 
 type contextReader struct {

@@ -54,7 +54,7 @@ func (server *server) login(w http.ResponseWriter, request *http.Request) {
 		Password   string `json:"password"`
 		ClientName string `json:"client_name"`
 	}
-	if err := decodeJSON(w, request, &body); err != nil {
+	if err := decodeJSONPayload(w, request, &body); err != nil {
 		writeDecodeError(w, request, err)
 		return
 	}

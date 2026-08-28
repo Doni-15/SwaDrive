@@ -18,17 +18,35 @@ import (
 )
 
 type Dependencies struct {
-	Auth    *auth.Service
-	Audit   *audit.Service
-	Files   *files.Service
-	Uploads *uploads.Service
-	Storage StorageAvailability
-	Logger  *slog.Logger
+	Auth      *auth.Service
+	Audit     *audit.Service
+	Files     *files.Service
+	Uploads   *uploads.Service
+	Storage   StorageAvailability
+	Metadata  MetadataAvailability
+	Readiness ReadinessChecker
+	Logger    *slog.Logger
 }
 
 type StorageAvailability interface {
 	Available() bool
 }
+
+type MetadataAvailability interface {
+	Available() bool
+}
+
+type ReadinessChecker interface {
+	Ready(ctx context.Context) error
+}
+
+type AvailabilityFunc func() bool
+
+func (function AvailabilityFunc) Available() bool { return function() }
+
+type ReadinessFunc func(context.Context) error
+
+func (function ReadinessFunc) Ready(ctx context.Context) error { return function(ctx) }
 
 type server struct {
 	auth            *auth.Service
@@ -36,6 +54,8 @@ type server struct {
 	files           *files.Service
 	uploads         *uploads.Service
 	storage         StorageAvailability
+	metadata        MetadataAvailability
+	readiness       ReadinessChecker
 	logger          *slog.Logger
 	loginAdmissions chan struct{}
 }
@@ -58,6 +78,8 @@ func NewHandler(dependencies Dependencies) http.Handler {
 		files:           dependencies.Files,
 		uploads:         dependencies.Uploads,
 		storage:         dependencies.Storage,
+		metadata:        dependencies.Metadata,
+		readiness:       dependencies.Readiness,
 		logger:          logger,
 		loginAdmissions: make(chan struct{}, maximumConcurrentLoginRequests),
 	}
@@ -73,10 +95,11 @@ func NewHandler(dependencies Dependencies) http.Handler {
 		}
 	}
 	ownerContent := func(handler http.Handler) http.Handler {
-		return server.requireAuthentication(server.requireStorage(handler), true)
+		return server.requireAuthentication(server.requireMetadata(server.requireStorage(handler)), true)
 	}
 
 	handle("GET /api/v1/health", http.HandlerFunc(server.health))
+	handle("GET /api/v1/ready", http.HandlerFunc(server.ready))
 	handle("POST /api/v1/auth/login", http.HandlerFunc(server.login))
 	handle("POST /api/v1/auth/logout", server.requireAuthentication(http.HandlerFunc(server.logout), false))
 	handle("GET /api/v1/auth/me", server.requireAuthentication(http.HandlerFunc(server.me), false))
@@ -85,18 +108,21 @@ func NewHandler(dependencies Dependencies) http.Handler {
 
 	handle("GET /api/v1/admin/audit-events", server.requireAuthentication(http.HandlerFunc(server.auditEvents), true))
 
-	handle("GET /api/v1/files", server.requireAuthentication(http.HandlerFunc(server.listFiles), true))
-	handle("GET /api/v1/files/metadata", server.requireAuthentication(http.HandlerFunc(server.fileMetadata), true))
+	ownerMetadata := func(handler http.Handler) http.Handler {
+		return server.requireAuthentication(server.requireMetadata(handler), true)
+	}
+	handle("GET /api/v1/files", ownerMetadata(http.HandlerFunc(server.listFiles)))
+	handle("GET /api/v1/files/metadata", ownerMetadata(http.HandlerFunc(server.fileMetadata)))
 	handle("POST /api/v1/folders", ownerContent(http.HandlerFunc(server.createFolder)))
 	handle("POST /api/v1/files/move", ownerContent(http.HandlerFunc(server.moveFile)))
 	handle("POST /api/v1/files/trash", ownerContent(http.HandlerFunc(server.trashFile)))
-	handle("GET /api/v1/trash", server.requireAuthentication(http.HandlerFunc(server.listTrash), true))
+	handle("GET /api/v1/trash", ownerMetadata(http.HandlerFunc(server.listTrash)))
 	handle("POST /api/v1/trash/{id}/restore", ownerContent(http.HandlerFunc(server.restoreTrash)))
-	handle("GET /api/v1/files/search", server.requireAuthentication(http.HandlerFunc(server.searchFiles), true))
+	handle("GET /api/v1/files/search", ownerMetadata(http.HandlerFunc(server.searchFiles)))
 	handle("GET /api/v1/files/content", ownerContent(http.HandlerFunc(server.downloadFile)))
 
 	handle("POST /api/v1/uploads", ownerContent(http.HandlerFunc(server.createUpload)))
-	handle("GET /api/v1/uploads/{id}", server.requireAuthentication(http.HandlerFunc(server.getUpload), true))
+	handle("GET /api/v1/uploads/{id}", ownerMetadata(http.HandlerFunc(server.getUpload)))
 	handle("PUT /api/v1/uploads/{id}/chunks/{index}", ownerContent(http.HandlerFunc(server.putUploadChunk)))
 	handle("POST /api/v1/uploads/{id}/complete", ownerContent(http.HandlerFunc(server.completeUpload)))
 	handle("DELETE /api/v1/uploads/{id}", ownerContent(http.HandlerFunc(server.cancelUpload)))
@@ -117,10 +143,35 @@ func (server *server) health(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"` + status + `","storage":"` + storageStatus + `"}`))
 }
 
+func (server *server) ready(w http.ResponseWriter, request *http.Request) {
+	if server.readiness == nil || server.readiness.Ready(request.Context()) != nil {
+		writeError(w, request, http.StatusServiceUnavailable, "not_ready", "The server control plane is not ready.")
+		return
+	}
+	storageStatus := "available"
+	if server.storage == nil || !server.storage.Available() {
+		storageStatus = "unavailable"
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Status  string `json:"status"`
+		Storage string `json:"storage"`
+	}{Status: "ready", Storage: storageStatus})
+}
+
 func (server *server) requireStorage(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if server.storage == nil || !server.storage.Available() {
 			server.writeServiceError(w, request, storage.ErrUnavailable)
+			return
+		}
+		next.ServeHTTP(w, request)
+	})
+}
+
+func (server *server) requireMetadata(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if server.metadata != nil && !server.metadata.Available() {
+			server.writeServiceError(w, request, files.ErrIndexInconsistent)
 			return
 		}
 		next.ServeHTTP(w, request)

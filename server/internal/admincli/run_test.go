@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Doni-15/SwaDrive/server/internal/auth"
 	"github.com/Doni-15/SwaDrive/server/internal/database"
 	"github.com/Doni-15/SwaDrive/server/internal/storage"
 )
@@ -73,6 +74,89 @@ func TestBootstrapOwnerUsesInteractivePasswordAndCreatesAuditEvent(t *testing.T)
 	)
 	if err == nil {
 		t.Fatal("second bootstrap owner succeeded; want refusal")
+	}
+}
+
+func TestSetOwnerPasswordRevokesEverySessionAndRollsBackWithAudit(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "admin.db")
+	oldPassword := "old sufficiently long passphrase"
+	readerFor := func(password string) PasswordReader {
+		reads := 0
+		return func(string) (string, error) {
+			reads++
+			if reads > 2 {
+				return "", errors.New("unexpected password read")
+			}
+			return password, nil
+		}
+	}
+	if err := Run(context.Background(), []string{"bootstrap-owner", "-database", databasePath, "-username", "owner"}, &bytes.Buffer{}, &bytes.Buffer{}, readerFor(oldPassword)); err != nil {
+		t.Fatalf("bootstrap owner: %v", err)
+	}
+
+	db := openAdminTestDatabase(t, databasePath)
+	authService, err := newAuthService(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := authService.Login(context.Background(), auth.LoginInput{Username: "owner", Password: oldPassword, ClientName: "first", RemoteIP: "192.0.2.1"})
+	if err != nil {
+		t.Fatalf("first login: %v", err)
+	}
+	if _, err := authService.Login(context.Background(), auth.LoginInput{Username: "owner", Password: oldPassword, ClientName: "second", RemoteIP: "192.0.2.2"}); err != nil {
+		t.Fatalf("second login: %v", err)
+	}
+
+	newPassword := "new sufficiently long passphrase"
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"set-owner-password", "-database", databasePath, "-username", "owner"}, &stdout, &bytes.Buffer{}, readerFor(newPassword)); err != nil {
+		t.Fatalf("set-owner-password: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "2 session(s) revoked") || strings.Contains(stdout.String(), newPassword) {
+		t.Fatalf("unsafe or incomplete reset output: %q", stdout.String())
+	}
+	if _, err := authService.Authenticate(context.Background(), first.Token.Value(), "request", "192.0.2.1"); !errors.Is(err, auth.ErrUnauthorized) {
+		t.Fatalf("old token authentication error = %v; want ErrUnauthorized", err)
+	}
+	if _, err := authService.Login(context.Background(), auth.LoginInput{Username: "owner", Password: oldPassword, ClientName: "old-password", RemoteIP: "192.0.2.3"}); !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Fatalf("old password login error = %v; want ErrInvalidCredentials", err)
+	}
+	newLogin, err := authService.Login(context.Background(), auth.LoginInput{Username: "owner", Password: newPassword, ClientName: "new-password", RemoteIP: "192.0.2.4"})
+	if err != nil {
+		t.Fatalf("new password login: %v", err)
+	}
+	var resetEvents int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE event_type = 'auth.owner_credentials_reset'`).Scan(&resetEvents); err != nil || resetEvents != 1 {
+		t.Fatalf("credential reset audit events = %d, %v; want 1", resetEvents, err)
+	}
+
+	var passwordHashBefore string
+	if err := db.QueryRow(`SELECT password_hash FROM users WHERE username = 'owner'`).Scan(&passwordHashBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		CREATE TRIGGER force_credential_reset_audit_failure
+		BEFORE INSERT ON audit_events
+		BEGIN
+			SELECT RAISE(ABORT, 'forced audit failure');
+		END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	failedPassword := "this reset must roll back safely"
+	if err := Run(context.Background(), []string{"set-owner-password", "-database", databasePath, "-username", "owner"}, &bytes.Buffer{}, &bytes.Buffer{}, readerFor(failedPassword)); err == nil {
+		t.Fatal("set-owner-password succeeded with forced audit failure")
+	}
+	var passwordHashAfter string
+	var revokedAt sql.NullInt64
+	if err := db.QueryRow(`SELECT password_hash FROM users WHERE username = 'owner'`).Scan(&passwordHashAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT revoked_at FROM sessions WHERE id = ?`, newLogin.Session.ID).Scan(&revokedAt); err != nil {
+		t.Fatal(err)
+	}
+	if passwordHashAfter != passwordHashBefore || revokedAt.Valid {
+		t.Fatalf("failed reset changed password/session: hash_changed=%t revoked=%t", passwordHashAfter != passwordHashBefore, revokedAt.Valid)
 	}
 }
 

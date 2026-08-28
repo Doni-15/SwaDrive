@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"errors"
 	"mime"
 	"net/http"
+	"time"
 
 	"github.com/Doni-15/SwaDrive/server/internal/files"
 )
+
+const downloadWriteIdleTimeout = 30 * time.Second
 
 type fileEntryResponse struct {
 	Path       string `json:"path"`
@@ -177,7 +181,45 @@ func (server *server) downloadFile(w http.ResponseWriter, request *http.Request)
 
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": entry.Name}))
-	http.ServeContent(w, request, entry.Name, entry.ModifiedAt, file)
+	deadlineWriter, clearDeadline, err := installWriteProgressDeadline(w, downloadWriteIdleTimeout)
+	if err != nil {
+		server.logger.ErrorContext(request.Context(), "download write deadline unavailable", "request_id", requestID(request), "error_type", "write_deadline")
+		w.Header().Set("Retry-After", "1")
+		writeError(w, request, http.StatusServiceUnavailable, "server_busy", "The server could not start the download.")
+		return
+	}
+	defer clearDeadline()
+	http.ServeContent(deadlineWriter, request, entry.Name, entry.ModifiedAt, file)
+}
+
+type writeProgressDeadlineWriter struct {
+	http.ResponseWriter
+	controller *http.ResponseController
+	timeout    time.Duration
+}
+
+func (writer *writeProgressDeadlineWriter) Write(data []byte) (int, error) {
+	if err := writer.controller.SetWriteDeadline(time.Now().Add(writer.timeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return 0, err
+	}
+	return writer.ResponseWriter.Write(data)
+}
+
+func (writer *writeProgressDeadlineWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+
+func installWriteProgressDeadline(w http.ResponseWriter, timeout time.Duration) (http.ResponseWriter, func(), error) {
+	controller := http.NewResponseController(w)
+	if err := controller.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		if errors.Is(err, http.ErrNotSupported) {
+			return w, func() {}, nil
+		}
+		return nil, nil, err
+	}
+	return &writeProgressDeadlineWriter{ResponseWriter: w, controller: controller, timeout: timeout}, func() {
+		_ = controller.SetWriteDeadline(time.Time{})
+	}, nil
 }
 
 func toFileEntries(entries []files.Entry) []fileEntryResponse {

@@ -15,14 +15,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Doni-15/SwaDrive/server/internal/audit"
 	"github.com/Doni-15/SwaDrive/server/internal/config"
 	"github.com/Doni-15/SwaDrive/server/internal/database"
 	"github.com/Doni-15/SwaDrive/server/internal/files"
+	"github.com/Doni-15/SwaDrive/server/internal/storage"
+	"github.com/Doni-15/SwaDrive/server/internal/uploads"
 )
 
 func TestMaximumHTTPHeaderBytesIs64KiB(t *testing.T) {
 	if maximumHTTPHeaderBytes != 64<<10 {
 		t.Fatalf("maximumHTTPHeaderBytes = %d; want %d", maximumHTTPHeaderBytes, 64<<10)
+	}
+}
+
+func TestHTTPServerTimeoutPolicyIsBounded(t *testing.T) {
+	if serverReadTimeout != 30*time.Second || serverWriteTimeout != 30*time.Second {
+		t.Fatalf("server timeouts = %v/%v; want 30s/30s", serverReadTimeout, serverWriteTimeout)
 	}
 }
 
@@ -79,6 +88,75 @@ func TestRunStartsHTTPServiceWhenStorageVolumeIdentityIsMissing(t *testing.T) {
 				directory,
 			)
 		}
+	}
+}
+
+func TestDegradedStartupClosesMetadataGateForPendingFilesystemReconciliation(t *testing.T) {
+	for _, pendingState := range []string{"trash", "upload"} {
+		t.Run(pendingState, func(t *testing.T) {
+			base := t.TempDir()
+			databasePath := filepath.Join(base, "state.db")
+			storageRoot := filepath.Join(base, "storage")
+			if err := os.Mkdir(storageRoot, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			db, err := database.Open(context.Background(), databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := database.Migrate(context.Background(), db); err != nil {
+				t.Fatal(err)
+			}
+			result, err := db.Exec(`
+				INSERT INTO users (username, password_hash, role, created_at, updated_at)
+				VALUES ('owner', 'test-only-hash', 'owner', 1, 1)
+			`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			userID, _ := result.LastInsertId()
+			switch pendingState {
+			case "trash":
+				_, err = db.Exec(`
+					INSERT INTO trash_entries (id, user_id, original_path, trash_name, trashed_at, state, updated_at)
+					VALUES ('1111111111111111', ?, 'pending.txt', '1111111111111111', 1, 'trashing', 1)
+				`, userID)
+			case "upload":
+				_, err = db.Exec(`
+					INSERT INTO uploads (
+						id, user_id, target_path, part_name, total_size, chunk_size, total_chunks,
+						status, created_at, updated_at, expires_at
+					) VALUES ('2222222222222222', ?, 'pending.bin', '2222222222222222.part', 0, ?, 0, 'finalizing', 1, 1, 2)
+				`, userID, uploads.ChunkSize1MiB)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			reason := "trash:1111111111111111"
+			if pendingState == "upload" {
+				reason = "upload:2222222222222222"
+			}
+			if _, err := db.Exec(`
+				UPDATE file_index_state
+				SET healthy = 0, unhealthy_reason = ?, updated_at = 1
+				WHERE singleton = 1
+			`, reason); err != nil {
+				t.Fatal(err)
+			}
+
+			provider := storage.OpenProvider(storageRoot, "missing-volume-marker", nil)
+			auditService := audit.NewService(audit.NewSQLiteRepository(db), nil)
+			coordinator := storage.NewMutationCoordinator()
+			index := files.NewSQLiteFileIndexRepository(db)
+			filesService := files.NewService(provider, files.NewSQLiteTrashRepository(db), index, coordinator, auditService, files.DefaultConcurrentDownloads, nil)
+			uploadService := uploads.NewService(uploads.NewSQLiteRepository(db), provider, coordinator, auditService, 0, uploads.DefaultConcurrentChunks, nil)
+
+			metadataAvailable, err := reconcileAvailableStorage(context.Background(), provider, filesService, uploadService, index)
+			if err != nil || metadataAvailable {
+				t.Fatalf("reconcileAvailableStorage() = %t, %v; want false, nil", metadataAvailable, err)
+			}
+		})
 	}
 }
 
