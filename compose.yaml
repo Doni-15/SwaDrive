@@ -1,0 +1,39 @@
+name: swadrive
+
+services:
+  server:
+    image: swadrive-server:1.0.2
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    environment:
+      SWADRIVE_DATABASE_PATH: /var/lib/swadrive/swadrive.db
+      SWADRIVE_STORAGE_ROOT: /srv/swadrive
+      SWADRIVE_STORAGE_VOLUME_ID: ${SWADRIVE_STORAGE_VOLUME_ID:?set SWADRIVE_STORAGE_VOLUME_ID}
+      SWADRIVE_LISTEN_ADDRESS: 0.0.0.0:8080
+      SWADRIVE_STORAGE_RESERVE_BYTES: ${SWADRIVE_STORAGE_RESERVE_BYTES:-1073741824}
+    volumes:
+      - type: bind
+        source: ${SWADRIVE_STATE_DIR:?set SWADRIVE_STATE_DIR}
+        target: /var/lib/swadrive
+      - type: bind
+        source: ${SWADRIVE_STORAGE_DIR:?set SWADRIVE_STORAGE_DIR}
+        target: /srv/swadrive
+    ports:
+      - "${SWADRIVE_BIND_ADDRESS:-127.0.0.1}:${SWADRIVE_HOST_PORT:-8080}:8080"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    pids_limit: 128
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

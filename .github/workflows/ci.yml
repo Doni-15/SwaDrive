@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Verify formatting
+        working-directory: server
+        run: test -z "$(gofmt -l .)"
+      - name: Verify modules
+        working-directory: server
+        run: go mod verify
+      - name: Build commands
+        working-directory: server
+        run: go build -trimpath ./cmd/...
+      - name: Test
+        working-directory: server
+        run: go test ./...
+      - name: Race test
+        working-directory: server
+        run: go test -race ./...
+      - name: Vet
+        working-directory: server
+        run: go vet ./...
+
+  flutter:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          flutter-version: 3.44.9
+          cache: true
+      - name: Resolve dependencies
+        working-directory: client
+        run: flutter pub get
+      - name: Verify formatting
+        working-directory: client
+        run: dart format --output=none --set-exit-if-changed .
+      - name: Analyze
+        working-directory: client
+        run: dart analyze
+      - name: Test
+        working-directory: client
+        run: flutter test
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Build server image
+        run: docker build --tag swadrive-server:ci server
