@@ -218,6 +218,13 @@ SWADRIVE_MAX_CONCURRENT_CHUNKS=8
 SWADRIVE_MAX_CONCURRENT_DOWNLOADS=32
 ```
 
+Catatan upgrade native `v1.0.2`: versi sebelumnya memakai default `:8080`
+(seluruh interface), sedangkan default baru adalah `127.0.0.1:8080`. Deployment
+native yang diakses langsung melalui alamat Tailscale harus menetapkan
+`SWADRIVE_LISTEN_ADDRESS='<tailscale-ip>:8080'` atau alamat lain yang sudah
+diaudit. Perubahan ini tidak memutus method/path/JSON API, tetapi mengubah
+default konfigurasi jaringan.
+
 Marker `.swadrive-volume` memverifikasi identitas yang diharapkan aplikasi,
 bukan membuktikan bahwa HDD benar-benar ter-mount. Deployment di production
 tetap wajib memastikan mount, urutan, dan ownership melalui OS serta `systemd`.

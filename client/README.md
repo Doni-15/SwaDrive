@@ -15,6 +15,8 @@ API yang valid:
 | HTTP 503 dengan `error.code=storage_unavailable` | `Penyimpanan server tidak tersedia` |
 | HTTP 503 dengan `error.code=server_busy` | `Server sedang sibuk` |
 | HTTP 503 dengan `error.code=metadata_unavailable` | `Metadata server belum tersedia` |
+| HTTP 408 dengan `error.code=request_timeout` | `Permintaan melewati batas waktu server` |
+| HTTP 408 dengan `error.code=request_cancelled` | `Permintaan dibatalkan` |
 
 `GET /api/v1/health` tetap memakai HTTP 200 ketika proses sehat dan storage
 tidak tersedia, dengan respons
@@ -25,6 +27,12 @@ atau UI baru yang ditambahkan dalam patch ini.
 siap; HTTP 503 memakai error envelope dengan `error.code=not_ready`. Setelah
 upload selesai, response `whole_sha256` selalu berisi SHA-256 hasil verifikasi
 server, termasuk ketika create request tidak mengirim checksum keseluruhan.
+Body JSON atau upload yang melewati deadline dan masih dapat menerima response
+memakai `request_timeout`; cancellation context memakai `request_cancelled`.
+Payload JSON yang malformed tetap memakai `invalid_json`, bukan timeout.
+Implementasi transfer client harus memberi budget sedikit di atas 5 menit 30
+detik untuk chunk/completion agar selaras dengan operation dan response budget
+backend, sambil tetap menyediakan cancellation yang nyata.
 
 Scaffold saat ini belum memanggil endpoint Go apa pun. Batas kontrak yang akan
 diimplementasikan berada pada bearer `Authorization`, JSON/error envelope,

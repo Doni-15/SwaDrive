@@ -18,15 +18,21 @@ full-project terhadap source repository saat ini.
 
 - Menyelesaikan commit/fallback metadata setelah trash, restore, complete,
   cancel, dan cleanup upload memakai bounded internal repair context setelah
-  side effect filesystem.
+  side effect filesystem. Marker fail-closed memakai bounded context kedua
+  yang independen jika repair utama menghabiskan deadline.
 - Menutup metadata plane saat startup degraded menemukan trash atau upload
   finalizing yang belum dapat direkonsiliasi.
 - Menambahkan timeout server, deadline body JSON/chunk, dan idle-progress
   deadline download agar slot transfer tidak dapat ditahan tanpa batas.
+  Operasi upload mendapat write budget khusus agar mutasi yang masih berada
+  dalam budget upload dapat mengirim respons; timeout dan cancellation memakai
+  kode API yang berbeda.
 - Meng-hash ulang setiap stored chunk saat completion dan menyimpan SHA-256
-  keseluruhan file meskipun client tidak mengirim checksum opsional.
+  keseluruhan file meskipun client tidak mengirim checksum opsional, termasuk
+  recovery destination yang sudah dipublikasikan oleh state legacy.
 - Mengubah default listener menjadi loopback; all-interface harus dipilih
-  secara eksplisit oleh deployment.
+  secara eksplisit oleh deployment. Upgrade native yang sebelumnya bergantung
+  pada default `:8080` harus mengatur `SWADRIVE_LISTEN_ADDRESS` secara eksplisit.
 - Menambahkan command lokal `set-owner-password` yang mengganti hash dan
   mencabut seluruh session dalam transaction yang sama dengan audit event.
 - Membatasi frekuensi probe storage pada health dan menambahkan readiness
@@ -36,7 +42,7 @@ full-project terhadap source repository saat ini.
 
 - Menambahkan image Docker multi-stage berbasis runtime distroless non-root,
   health-check binary, `.dockerignore`, dan Compose hardened dengan persistent
-  bind mount dan host port privat.
+  bind mount, penolakan bind source yang belum ada, dan host port privat.
 - Menambahkan CI dengan action yang dipin ke commit SHA untuk build/test/race/
   vet Go, format/analyze/test Flutter, dan build Docker.
 - Menambahkan widget test untuk scaffold Flutter.

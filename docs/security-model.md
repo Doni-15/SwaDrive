@@ -110,9 +110,11 @@ jaringan privat.
   fallback root.
 - cancellation tepat setelah trash/restore/finalisasi/cancel tidak memutus
   repair metadata; startup degraded menutup metadata gate jika reconciliation
-  filesystem masih pending.
+  filesystem masih pending; repair yang menghabiskan deadline memakai bounded
+  context kedua untuk menandai index unhealthy.
 - body JSON/chunk dan writer download memiliki deadline terbatas; stored chunk
-  di-hash ulang saat completion meskipun whole checksum client tidak tersedia.
+  di-hash ulang saat completion meskipun whole checksum client tidak tersedia,
+  termasuk recovery published destination dari state legacy.
 - reset password owner mencabut seluruh session secara transaction-safe.
 
 ## Kebijakan Regression Test
@@ -143,8 +145,11 @@ Argon2 (default 4), upload chunk (8), download (32), dan request login (64)
 masing-masing memiliki process-local concurrency gate. Request body untuk login
 dibatasi 64 KiB dengan read deadline khusus login selama 15 detik. Server
 memakai read/write timeout umum 30 detik; JSON body dibatasi 30 detik, chunk
-upload 5 menit, dan deadline writer download diperbarui hanya ketika progress
-masih terjadi.
+upload 5 menit, operasi chunk/completion memiliki write budget 5 menit 30 detik,
+completion context dibatasi 5 menit, dan deadline writer download diperbarui
+hanya ketika progress masih terjadi.
+Timeout yang masih dapat merespons memakai HTTP 408 `request_timeout`, sedangkan
+cancellation context memakai HTTP 408 `request_cancelled`.
 Listing/search/audit pagination, upload count, chunk count/size, DB pool,
 startup reconciliation, dan admin orphan scan juga dibatasi.
 

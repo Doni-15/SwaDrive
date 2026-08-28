@@ -166,8 +166,10 @@ atau side effect filesystem terjadi, commit metadata, audit, compensation, dan
 fallback fail-closed memakai internal repair context yang terbatas dan tidak
 dibatalkan hanya karena request client terputus. Aturan ini berlaku untuk mkdir,
 move, trash, restore, complete, cancel, dan cleanup upload. Kegagalan repair
-internal tetap membiarkan transitional state atau index unhealthy. Crash di
-tengah operasi
+utama setelah side effect memicu marker index unhealthy dengan bounded context
+kedua yang independen; marker tidak memakai ulang context repair yang sudah
+expired. Kegagalan repair internal tetap membiarkan transitional state atau
+index unhealthy. Crash di tengah operasi
 membuat startup fail-closed sampai reindex eksplisit dilakukan, bukan memicu
 HDD scan. Upload part yang dibuat sebelum DB commit tidak dipublikasikan;
 administrator dapat menjalankan `reconcile-upload-parts` dengan pembatasan
