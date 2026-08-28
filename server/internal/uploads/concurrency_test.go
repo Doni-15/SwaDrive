@@ -17,6 +17,7 @@ import (
 	"github.com/Doni-15/SwaDrive/server/internal/audit"
 	"github.com/Doni-15/SwaDrive/server/internal/auth"
 	"github.com/Doni-15/SwaDrive/server/internal/database"
+	"github.com/Doni-15/SwaDrive/server/internal/files"
 	"github.com/Doni-15/SwaDrive/server/internal/storage"
 )
 
@@ -378,7 +379,12 @@ func TestStartupFinalizingReconciliationStateMatrix(t *testing.T) {
 
 	t.Run("published destination completes with physical metadata", func(t *testing.T) {
 		environment := newUploadTestEnvironment(t, 1)
-		upload := environment.create(t, "published.bin", 0)
+		content := []byte("legacy published content")
+		upload := environment.create(t, "published.bin", int64(len(content)))
+		checksum := sha256.Sum256(content)
+		if _, err := environment.service.PutChunk(context.Background(), environment.identity, upload.ID, 0, bytes.NewReader(content), checksum[:]); err != nil {
+			t.Fatalf("PutChunk(legacy fixture) error = %v", err)
+		}
 
 		if err := environment.service.repository.TransitionStatus(
 			context.Background(),
@@ -410,6 +416,9 @@ func TestStartupFinalizingReconciliationStateMatrix(t *testing.T) {
 		completed, err := environment.service.repository.Find(context.Background(), upload.UserID, upload.ID)
 		if err != nil || completed.Status != StatusCompleted {
 			t.Fatalf("published status = %s, %v; want completed", completed.Status, err)
+		}
+		if !bytes.Equal(completed.WholeSHA256, checksum[:]) {
+			t.Fatalf("published checksum = %x; want %x", completed.WholeSHA256, checksum)
 		}
 
 		var indexed int
@@ -596,6 +605,34 @@ func TestCompleteAndCancelRepairAfterRequestCancellation(t *testing.T) {
 	})
 }
 
+func TestExpiredUploadCompletionRepairUsesIndependentFailClosedMarker(t *testing.T) {
+	environment := newUploadTestEnvironment(t, 1)
+	upload := environment.create(t, "expired-completion-repair.bin", 0)
+	repository := &expiringCompletionRepository{Repository: environment.service.repository}
+	environment.service.repository = repository
+	environment.service.repairTimeout = 100 * time.Millisecond
+
+	if _, err := environment.service.Complete(context.Background(), environment.identity, upload.ID); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Complete() error = %v; want context.DeadlineExceeded", err)
+	}
+	if !errors.Is(repository.completionContextErr, context.DeadlineExceeded) {
+		t.Fatalf("completion context error = %v; want context.DeadlineExceeded", repository.completionContextErr)
+	}
+	if repository.markerContextErr != nil {
+		t.Fatalf("fail-closed marker inherited expired context: %v", repository.markerContextErr)
+	}
+	if err := files.NewSQLiteFileIndexRepository(environment.db).CheckHealthy(context.Background()); !errors.Is(err, files.ErrIndexInconsistent) {
+		t.Fatalf("index health = %v; want files.ErrIndexInconsistent", err)
+	}
+	stored, err := repository.Repository.Find(context.Background(), upload.UserID, upload.ID)
+	if err != nil || stored.Status != StatusFinalizing {
+		t.Fatalf("durable upload state = %s, %v; want finalizing", stored.Status, err)
+	}
+	if _, err := os.Stat(filepath.Join(environment.root, "files", upload.TargetPath)); err != nil {
+		t.Fatalf("published filesystem side effect missing: %v", err)
+	}
+}
+
 func TestCompletionRehashesStoredChunksWithoutClientWholeChecksum(t *testing.T) {
 	environment := newUploadTestEnvironment(t, 1)
 	content := []byte("original bytes")
@@ -718,6 +755,23 @@ type cancelAfterUploadMutationStorage struct {
 	cancelRemove   context.CancelFunc
 }
 
+type expiringCompletionRepository struct {
+	Repository
+	completionContextErr error
+	markerContextErr     error
+}
+
+func (repository *expiringCompletionRepository) CompleteWithAudit(ctx context.Context, _ int64, _ string, _ time.Time, _ files.Entry, _ audit.Event) error {
+	<-ctx.Done()
+	repository.completionContextErr = ctx.Err()
+	return ctx.Err()
+}
+
+func (repository *expiringCompletionRepository) MarkIndexUnhealthy(ctx context.Context, reason string, updatedAt time.Time) error {
+	repository.markerContextErr = ctx.Err()
+	return repository.Repository.MarkIndexUnhealthy(ctx, reason, updatedAt)
+}
+
 func (storageManager *cancelAfterUploadMutationStorage) FinalizePart(partName string, destination storage.Path) error {
 	err := storageManager.Storage.FinalizePart(partName, destination)
 	if err == nil && storageManager.cancelFinalize != nil {
@@ -742,9 +796,12 @@ func (guard *failOnUploadStorage) called() error {
 	return errors.New("unexpected storage call")
 }
 
-func (guard *failOnUploadStorage) PrepareUpload(storage.Path) error        { return guard.called() }
-func (guard *failOnUploadStorage) CreatePart(string) error                 { return guard.called() }
-func (guard *failOnUploadStorage) OpenPart(string) (*os.File, error)       { return nil, guard.called() }
+func (guard *failOnUploadStorage) PrepareUpload(storage.Path) error  { return guard.called() }
+func (guard *failOnUploadStorage) CreatePart(string) error           { return guard.called() }
+func (guard *failOnUploadStorage) OpenPart(string) (*os.File, error) { return nil, guard.called() }
+func (guard *failOnUploadStorage) OpenDownload(storage.Path) (*os.File, storage.Entry, error) {
+	return nil, storage.Entry{}, guard.called()
+}
 func (guard *failOnUploadStorage) RemovePart(string) error                 { return guard.called() }
 func (guard *failOnUploadStorage) PartInfo(string) (os.FileInfo, error)    { return nil, guard.called() }
 func (guard *failOnUploadStorage) FinalizePart(string, storage.Path) error { return guard.called() }

@@ -30,6 +30,7 @@ type Storage interface {
 	PrepareUpload(destination storage.Path) error
 	CreatePart(name string) error
 	OpenPart(name string) (*os.File, error)
+	OpenDownload(path storage.Path) (*os.File, storage.Entry, error)
 	RemovePart(name string) error
 	PartInfo(name string) (os.FileInfo, error)
 	FinalizePart(partName string, destination storage.Path) error
@@ -47,6 +48,7 @@ type Service struct {
 	audit           AuditRecorder
 	reserve         uint64
 	now             func() time.Time
+	repairTimeout   time.Duration
 	locks           *uploadLocks
 	mutations       *storage.MutationCoordinator
 	chunkSlots      chan struct{}
@@ -69,6 +71,7 @@ func NewService(repository Repository, storageManager Storage, mutationCoordinat
 		audit:           auditRecorder,
 		reserve:         reserve,
 		now:             now,
+		repairTimeout:   consistencyRepairTimeout,
 		locks:           newUploadLocks(),
 		mutations:       mutationCoordinator,
 		chunkSlots:      make(chan struct{}, maxConcurrentChunks),
@@ -306,11 +309,15 @@ func (service *Service) Complete(ctx context.Context, identity auth.Identity, id
 		}
 		if !state.PartExists && state.DestinationExists {
 			now := service.now().UTC()
+			if err := service.validatePublishedState(ctx, upload, state, now); err != nil {
+				return Upload{}, err
+			}
+			upload, err = service.ensurePublishedChecksum(ctx, upload, destination)
+			if err != nil {
+				return Upload{}, err
+			}
 			var completed Upload
 			err := service.runConsistencyRepair(ctx, func(repairContext context.Context) error {
-				if err := service.validatePublishedState(repairContext, upload, state, now); err != nil {
-					return err
-				}
 				if err := service.completePublished(repairContext, upload, identity, state.DestinationModifiedAt, now, nil); err != nil {
 					return err
 				}
@@ -439,7 +446,7 @@ func (service *Service) CleanupExpired(ctx context.Context) (int, error) {
 
 func (service *Service) validatePublishedState(ctx context.Context, upload Upload, state storage.PublicationState, now time.Time) error {
 	if !state.DestinationExists || state.DestinationSize != upload.TotalSize {
-		markErr := service.repository.MarkIndexUnhealthy(ctx, uploadHealthReason(upload.ID), now)
+		markErr := service.markIndexUnhealthy(ctx, uploadHealthReason(upload.ID), now)
 		return errors.Join(
 			files.ErrIndexInconsistent,
 			fmt.Errorf("%w: published destination size does not match upload metadata", ErrFinalizationReconciliation),
@@ -457,6 +464,9 @@ func (service *Service) completePublished(
 	now time.Time,
 	metadata map[string]string,
 ) error {
+	if len(upload.WholeSHA256) != sha256.Size {
+		return fmt.Errorf("%w: completed upload checksum is unavailable", ErrFinalizationReconciliation)
+	}
 	destination, err := storage.ParsePath(upload.TargetPath, false)
 	if err != nil {
 		return err
@@ -467,7 +477,7 @@ func (service *Service) completePublished(
 	}
 	event := service.event(identity, upload.ID, upload.TargetPath, audit.EventUploadCompleted, audit.OutcomeSuccess, metadata)
 	if err := service.repository.CompleteWithAudit(ctx, upload.UserID, upload.ID, now, entry, event); err != nil {
-		markErr := service.repository.MarkIndexUnhealthy(ctx, uploadHealthReason(upload.ID), now)
+		markErr := service.markIndexUnhealthy(ctx, uploadHealthReason(upload.ID), now)
 		return errors.Join(err, markErr)
 	}
 	return nil
@@ -550,6 +560,10 @@ func (service *Service) reconcileFinalizingUpload(ctx context.Context, candidate
 		if err := service.validatePublishedState(ctx, upload, state, now); err != nil {
 			return err
 		}
+		upload, err = service.ensurePublishedChecksum(ctx, upload, destination)
+		if err != nil {
+			return err
+		}
 
 		actorUserID := upload.UserID
 		identity := auth.Identity{
@@ -569,7 +583,7 @@ func (service *Service) reconcileFinalizingUpload(ctx context.Context, candidate
 		)
 
 	default:
-		markErr := service.repository.MarkIndexUnhealthy(ctx, uploadHealthReason(upload.ID), now)
+		markErr := service.markIndexUnhealthy(ctx, uploadHealthReason(upload.ID), now)
 		return errors.Join(
 			fmt.Errorf("%w: upload %s has ambiguous filesystem state", ErrFinalizationReconciliation, upload.ID),
 			markErr,
@@ -631,10 +645,40 @@ func (service *Service) verifyAndSyncPart(ctx context.Context, upload Upload) ([
 	return computedChecksum, nil
 }
 
+func (service *Service) ensurePublishedChecksum(ctx context.Context, upload Upload, destination storage.Path) (Upload, error) {
+	if len(upload.WholeSHA256) == sha256.Size {
+		return upload, nil
+	}
+	file, entry, err := service.storage.OpenDownload(destination)
+	if err != nil {
+		return Upload{}, err
+	}
+	defer file.Close()
+	if entry.Size != upload.TotalSize {
+		return Upload{}, ErrChunkLength
+	}
+	hasher := sha256.New()
+	written, err := io.CopyBuffer(hasher, &contextReader{ctx: ctx, reader: file}, make([]byte, 128*1024))
+	if err != nil {
+		return Upload{}, fmt.Errorf("hash published upload: %w", err)
+	}
+	if written != upload.TotalSize {
+		return Upload{}, ErrChunkLength
+	}
+	upload.WholeSHA256 = hasher.Sum(nil)
+	return upload, nil
+}
+
 func (service *Service) runConsistencyRepair(requestContext context.Context, repair func(context.Context) error) error {
-	repairContext, cancel := context.WithTimeout(context.WithoutCancel(requestContext), consistencyRepairTimeout)
+	repairContext, cancel := context.WithTimeout(context.WithoutCancel(requestContext), service.repairTimeout)
 	defer cancel()
 	return repair(repairContext)
+}
+
+func (service *Service) markIndexUnhealthy(requestContext context.Context, reason string, now time.Time) error {
+	return service.runConsistencyRepair(requestContext, func(markerContext context.Context) error {
+		return service.repository.MarkIndexUnhealthy(markerContext, reason, now)
+	})
 }
 
 type contextReader struct {

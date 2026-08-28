@@ -764,6 +764,77 @@ func TestResumableUploadHTTPIntegrityPersistenceAndCleanup(t *testing.T) {
 	}
 }
 
+func TestUploadBodyTimeoutUsesStableRequestTimeoutError(t *testing.T) {
+	application := newHTTPTestApplication(t)
+	token, _, login := application.login(t, testOwnerUsername, testOwnerPassword, "Timeout upload device")
+	if login.Code != http.StatusOK {
+		t.Fatalf("login = %d %s", login.Code, login.Body.String())
+	}
+	upload := createUploadHTTP(t, application, token, "timeout.bin", 1, uploads.ChunkSize1MiB, "", http.StatusCreated)
+	checksum := sha256.Sum256([]byte{0x01})
+	request := httptest.NewRequest(
+		http.MethodPut,
+		fmt.Sprintf("/api/v1/uploads/%s/chunks/0", upload.ID),
+		errorReader{err: testTimeoutError{}},
+	)
+	request.RemoteAddr = "192.0.2.10:54321"
+	request.ContentLength = 1
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/octet-stream")
+	request.Header.Set("X-Chunk-SHA256", hex.EncodeToString(checksum[:]))
+	recorder := httptest.NewRecorder()
+	application.handler.ServeHTTP(recorder, request)
+	assertError(t, recorder, http.StatusRequestTimeout, "request_timeout")
+
+	var chunks int
+	if err := application.db.QueryRow(`SELECT COUNT(*) FROM upload_chunks WHERE upload_id = ?`, upload.ID).Scan(&chunks); err != nil || chunks != 0 {
+		t.Fatalf("recorded chunks after timeout = %d, %v; want 0", chunks, err)
+	}
+}
+
+func TestSlowUploadCanRespondBeyondGlobalServerWriteTimeout(t *testing.T) {
+	application := newHTTPTestApplication(t)
+	token, _, login := application.login(t, testOwnerUsername, testOwnerPassword, "Slow upload device")
+	if login.Code != http.StatusOK {
+		t.Fatalf("login = %d %s", login.Code, login.Body.String())
+	}
+	content := []byte("slow chunk")
+	upload := createUploadHTTP(t, application, token, "slow-response.bin", int64(len(content)), uploads.ChunkSize1MiB, "", http.StatusCreated)
+	checksum := sha256.Sum256(content)
+
+	testServer := httptest.NewUnstartedServer(application.handler)
+	testServer.Config.WriteTimeout = 50 * time.Millisecond
+	testServer.Start()
+	defer testServer.Close()
+
+	request, err := http.NewRequest(
+		http.MethodPut,
+		testServer.URL+fmt.Sprintf("/api/v1/uploads/%s/chunks/0", upload.ID),
+		io.NopCloser(&delayedReader{reader: bytes.NewReader(content), delay: 150 * time.Millisecond}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ContentLength = int64(len(content))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/octet-stream")
+	request.Header.Set("X-Chunk-SHA256", hex.EncodeToString(checksum[:]))
+	client := testServer.Client()
+	client.Timeout = 3 * time.Second
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("slow upload response error = %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read slow upload response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte(`"idempotent":false`)) {
+		t.Fatalf("slow upload response = %d %q; want 200 accepted result", response.StatusCode, body)
+	}
+}
+
 func TestConcurrentUploadChunkRetriesAreSafe(t *testing.T) {
 	application := newHTTPTestApplication(t)
 	token, _, login := application.login(t, testOwnerUsername, testOwnerPassword, "Concurrent upload device")
@@ -841,6 +912,17 @@ func createHTTPTestUser(t *testing.T, application *httpTestApplication, username
 		t.Fatalf("read test user ID: %v", err)
 	}
 	return id
+}
+
+type delayedReader struct {
+	reader io.Reader
+	delay  time.Duration
+	once   sync.Once
+}
+
+func (reader *delayedReader) Read(buffer []byte) (int, error) {
+	reader.once.Do(func() { time.Sleep(reader.delay) })
+	return reader.reader.Read(buffer)
 }
 
 func createUploadHTTP(

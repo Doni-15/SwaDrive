@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -118,6 +119,35 @@ func TestLoginInstallsAndClearsRouteSpecificReadDeadline(t *testing.T) {
 	}
 }
 
+func TestJSONBodyFailureContractDistinguishesTimeoutCancellationAndMalformedInput(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       io.Reader
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "deadline", body: errorReader{err: testTimeoutError{}}, wantStatus: http.StatusRequestTimeout, wantCode: "request_timeout"},
+		{name: "cancellation", body: errorReader{err: context.Canceled}, wantStatus: http.StatusRequestTimeout, wantCode: "request_cancelled"},
+		{name: "malformed JSON", body: strings.NewReader(`{`), wantStatus: http.StatusBadRequest, wantCode: "invalid_json"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := &server{
+				logger:          slog.New(slog.DiscardHandler),
+				loginAdmissions: make(chan struct{}, maximumConcurrentLoginRequests),
+			}
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", test.body)
+			request.Header.Set("Content-Type", "application/json")
+			request = request.WithContext(context.WithValue(request.Context(), requestIDContextKey, "request-id"))
+			recorder := httptest.NewRecorder()
+			server.login(recorder, request)
+			if recorder.Code != test.wantStatus || !strings.Contains(recorder.Body.String(), `"code":"`+test.wantCode+`"`) {
+				t.Fatalf("response = %d %q; want %d/%s", recorder.Code, recorder.Body.String(), test.wantStatus, test.wantCode)
+			}
+		})
+	}
+}
+
 func TestDuplicateSecurityHeadersAreRejected(t *testing.T) {
 	t.Run("Authorization", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
@@ -149,6 +179,18 @@ type deadlineResponseRecorder struct {
 	writeDeadlines []time.Time
 }
 
+type errorReader struct {
+	err error
+}
+
+func (reader errorReader) Read([]byte) (int, error) { return 0, reader.err }
+
+type testTimeoutError struct{}
+
+func (testTimeoutError) Error() string   { return "test read timeout" }
+func (testTimeoutError) Timeout() bool   { return true }
+func (testTimeoutError) Temporary() bool { return false }
+
 func (recorder *deadlineResponseRecorder) SetReadDeadline(deadline time.Time) error {
 	recorder.deadlines = append(recorder.deadlines, deadline)
 	return nil
@@ -168,6 +210,16 @@ func TestRouteSpecificTransferDeadlinesAreInstalledAndCleared(t *testing.T) {
 	clearRead()
 	if len(readRecorder.deadlines) != 2 || readRecorder.deadlines[0].IsZero() || !readRecorder.deadlines[1].IsZero() {
 		t.Fatalf("read deadlines = %v; want nonzero then cleared", readRecorder.deadlines)
+	}
+
+	uploadRecorder := &deadlineResponseRecorder{ResponseRecorder: httptest.NewRecorder()}
+	finishUploadWrite, err := installWriteDeadline(uploadRecorder, uploadOperationWriteTimeout, uploadResponseWriteTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishUploadWrite()
+	if len(uploadRecorder.writeDeadlines) != 2 || uploadRecorder.writeDeadlines[0].IsZero() || uploadRecorder.writeDeadlines[1].IsZero() || !uploadRecorder.writeDeadlines[1].Before(uploadRecorder.writeDeadlines[0]) {
+		t.Fatalf("upload write deadlines = %v; want operation deadline then shorter response deadline", uploadRecorder.writeDeadlines)
 	}
 
 	writeRecorder := &deadlineResponseRecorder{ResponseRecorder: httptest.NewRecorder()}

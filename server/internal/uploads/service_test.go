@@ -50,6 +50,9 @@ func (unavailableUploadStorage) CreatePart(string) error          { return stora
 func (unavailableUploadStorage) OpenPart(string) (*os.File, error) {
 	return nil, storage.ErrUnavailable
 }
+func (unavailableUploadStorage) OpenDownload(storage.Path) (*os.File, storage.Entry, error) {
+	return nil, storage.Entry{}, storage.ErrUnavailable
+}
 func (unavailableUploadStorage) RemovePart(string) error { return storage.ErrUnavailable }
 func (unavailableUploadStorage) PartInfo(string) (os.FileInfo, error) {
 	return nil, storage.ErrUnavailable

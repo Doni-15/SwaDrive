@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -69,13 +70,13 @@ func decodeJSONPayload(w http.ResponseWriter, request *http.Request, destination
 	decoder := json.NewDecoder(request.Body)
 	var raw json.RawMessage
 	if err := decoder.Decode(&raw); err != nil {
-		return err
+		return classifyBodyReadError(request, err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return errors.New("multiple JSON values")
 		}
-		return err
+		return classifyBodyReadError(request, err)
 	}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) < 2 || trimmed[0] != '{' {
@@ -100,6 +101,45 @@ func installReadDeadline(w http.ResponseWriter, timeout time.Duration) (func(), 
 	return func() { _ = controller.SetReadDeadline(time.Time{}) }, nil
 }
 
+func installWriteDeadline(w http.ResponseWriter, operationTimeout, responseTimeout time.Duration) (func(), error) {
+	controller := http.NewResponseController(w)
+	if err := controller.SetWriteDeadline(time.Now().Add(operationTimeout)); err != nil {
+		if errors.Is(err, http.ErrNotSupported) {
+			return func() {}, nil
+		}
+		return nil, fmt.Errorf("set response write deadline: %w", err)
+	}
+	return func() { _ = controller.SetWriteDeadline(time.Now().Add(responseTimeout)) }, nil
+}
+
+func classifyBodyReadError(request *http.Request, err error) error {
+	if isTimeoutError(err) {
+		return errors.Join(context.DeadlineExceeded, err)
+	}
+	if requestErr := request.Context().Err(); requestErr != nil {
+		return errors.Join(requestErr, err)
+	}
+	return err
+}
+
+func isTimeoutError(err error) bool {
+	var networkError net.Error
+	return errors.As(err, &networkError) && networkError.Timeout()
+}
+
+func writeRequestTerminationError(w http.ResponseWriter, request *http.Request, err error) bool {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), isTimeoutError(err):
+		writeError(w, request, http.StatusRequestTimeout, "request_timeout", "The request timed out.")
+		return true
+	case errors.Is(err, context.Canceled):
+		writeError(w, request, http.StatusRequestTimeout, "request_cancelled", "The request was cancelled.")
+		return true
+	default:
+		return false
+	}
+}
+
 func writeDecodeError(w http.ResponseWriter, request *http.Request, err error) {
 	if errors.Is(err, errUnsupportedMediaType) {
 		writeError(w, request, http.StatusUnsupportedMediaType, "unsupported_media_type", "The request body must use application/json.")
@@ -108,6 +148,9 @@ func writeDecodeError(w http.ResponseWriter, request *http.Request, err error) {
 	var maxBytesError *http.MaxBytesError
 	if errors.As(err, &maxBytesError) {
 		writeError(w, request, http.StatusRequestEntityTooLarge, "request_too_large", "The request body is too large.")
+		return
+	}
+	if writeRequestTerminationError(w, request, err) {
 		return
 	}
 	writeError(w, request, http.StatusBadRequest, "invalid_json", "The JSON request body is invalid.")
@@ -134,6 +177,10 @@ func (server *server) writeServiceError(w http.ResponseWriter, request *http.Req
 		writeError(w, request, http.StatusTooManyRequests, "rate_limited", "Too many login attempts. Try again later.")
 	case errors.As(err, &maxBytesError):
 		writeError(w, request, http.StatusRequestEntityTooLarge, "request_too_large", "The request body is too large.")
+	case errors.Is(err, context.DeadlineExceeded), isTimeoutError(err):
+		writeRequestTerminationError(w, request, err)
+	case errors.Is(err, context.Canceled):
+		writeRequestTerminationError(w, request, err)
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		writeError(w, request, http.StatusUnauthorized, "invalid_credentials", "Invalid username or password.")
 	case errors.Is(err, auth.ErrUnauthorized):
@@ -160,8 +207,6 @@ func (server *server) writeServiceError(w http.ResponseWriter, request *http.Req
 		writeError(w, request, http.StatusBadRequest, "invalid_request", "The request is invalid.")
 	case errors.Is(err, storage.ErrNotDirectory), errors.Is(err, storage.ErrNotRegularFile):
 		writeError(w, request, http.StatusBadRequest, "invalid_resource_type", "The resource has the wrong type for this operation.")
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		writeError(w, request, http.StatusRequestTimeout, "request_cancelled", "The request was cancelled.")
 	default:
 		server.logger.ErrorContext(request.Context(), "request operation failed", "request_id", requestID(request), "error_type", "internal")
 		writeError(w, request, http.StatusInternalServerError, "internal_error", "The server could not complete the request.")

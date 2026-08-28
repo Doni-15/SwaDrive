@@ -201,6 +201,84 @@ func TestTrashAndRestoreCancellationAfterStorageKeepMetadataConsistent(t *testin
 	}
 }
 
+func TestExpiredFileRepairUsesIndependentFailClosedMarker(t *testing.T) {
+	const repairTimeout = 100 * time.Millisecond
+
+	t.Run("trash", func(t *testing.T) {
+		service, manager, db, identity, root := newFilesTestService(t)
+		writeVisibleFile(t, root, "expired-trash.txt", []byte("trash content"))
+		reindexFiles(t, db, manager)
+
+		index := NewSQLiteFileIndexRepository(db)
+		recordingIndex := &recordingHealthRepository{FileIndexRepository: index}
+		expiringTrash := &expiringTrashRepairRepository{
+			TrashRepository: NewSQLiteTrashRepository(db),
+			expireCommit:    true,
+		}
+		service.index = recordingIndex
+		service.trash = expiringTrash
+		service.repairTimeout = repairTimeout
+
+		if _, err := service.Trash(context.Background(), identity, "expired-trash.txt"); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Trash() error = %v; want context.DeadlineExceeded", err)
+		}
+		if !errors.Is(expiringTrash.primaryContextErr, context.DeadlineExceeded) {
+			t.Fatalf("primary repair context error = %v; want context.DeadlineExceeded", expiringTrash.primaryContextErr)
+		}
+		if recordingIndex.markContextErr != nil {
+			t.Fatalf("fail-closed marker inherited expired context: %v", recordingIndex.markContextErr)
+		}
+		if err := index.CheckHealthy(context.Background()); !errors.Is(err, ErrIndexInconsistent) {
+			t.Fatalf("index health = %v; want ErrIndexInconsistent", err)
+		}
+		if _, err := service.Metadata(context.Background(), identity, "expired-trash.txt"); !errors.Is(err, ErrIndexInconsistent) {
+			t.Fatalf("metadata error = %v; want fail-closed ErrIndexInconsistent", err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "files", "expired-trash.txt")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("filesystem side effect did not complete: %v", err)
+		}
+	})
+
+	t.Run("restore", func(t *testing.T) {
+		service, manager, db, identity, root := newFilesTestService(t)
+		writeVisibleFile(t, root, "expired-restore.txt", []byte("restore content"))
+		reindexFiles(t, db, manager)
+		entry, err := service.Trash(context.Background(), identity, "expired-restore.txt")
+		if err != nil {
+			t.Fatalf("prepare trash fixture: %v", err)
+		}
+
+		index := NewSQLiteFileIndexRepository(db)
+		recordingIndex := &recordingHealthRepository{FileIndexRepository: index}
+		expiringTrash := &expiringTrashRepairRepository{
+			TrashRepository: NewSQLiteTrashRepository(db),
+			expireFinish:    true,
+		}
+		service.index = recordingIndex
+		service.trash = expiringTrash
+		service.repairTimeout = repairTimeout
+
+		if err := service.Restore(context.Background(), identity, entry.ID); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Restore() error = %v; want context.DeadlineExceeded", err)
+		}
+		if !errors.Is(expiringTrash.primaryContextErr, context.DeadlineExceeded) {
+			t.Fatalf("primary repair context error = %v; want context.DeadlineExceeded", expiringTrash.primaryContextErr)
+		}
+		if recordingIndex.markContextErr != nil {
+			t.Fatalf("fail-closed marker inherited expired context: %v", recordingIndex.markContextErr)
+		}
+		if err := index.CheckHealthy(context.Background()); !errors.Is(err, ErrIndexInconsistent) {
+			t.Fatalf("index health = %v; want ErrIndexInconsistent", err)
+		}
+		if _, err := service.Metadata(context.Background(), identity, "expired-restore.txt"); !errors.Is(err, ErrIndexInconsistent) {
+			t.Fatalf("metadata error = %v; want fail-closed ErrIndexInconsistent", err)
+		}
+		if contents, err := os.ReadFile(filepath.Join(root, "files", "expired-restore.txt")); err != nil || string(contents) != "restore content" {
+			t.Fatalf("filesystem restore = %q, %v", contents, err)
+		}
+	})
+}
+
 func TestCancelledCreateDatabaseFailureCompensatesAndClearsIntent(t *testing.T) {
 	service, manager, db, identity, root := newFilesTestService(t)
 	installFileAuditFailureTrigger(t, db)
@@ -549,6 +627,41 @@ func (storageManager *cancelAfterMutationStorage) Move(source, destination stora
 type clearMutationFailureRepository struct {
 	FileIndexRepository
 	clearContextErr error
+}
+
+type recordingHealthRepository struct {
+	FileIndexRepository
+	markContextErr error
+}
+
+func (repository *recordingHealthRepository) MarkUnhealthy(ctx context.Context, reason string, now time.Time) error {
+	repository.markContextErr = ctx.Err()
+	return repository.FileIndexRepository.MarkUnhealthy(ctx, reason, now)
+}
+
+type expiringTrashRepairRepository struct {
+	TrashRepository
+	expireCommit      bool
+	expireFinish      bool
+	primaryContextErr error
+}
+
+func (repository *expiringTrashRepairRepository) CommitTrashWithAudit(ctx context.Context, userID int64, id string, updatedAt time.Time, event audit.Event) error {
+	if !repository.expireCommit {
+		return repository.TrashRepository.CommitTrashWithAudit(ctx, userID, id, updatedAt, event)
+	}
+	<-ctx.Done()
+	repository.primaryContextErr = ctx.Err()
+	return ctx.Err()
+}
+
+func (repository *expiringTrashRepairRepository) FinishRestoreWithAudit(ctx context.Context, userID int64, id string, event audit.Event) error {
+	if !repository.expireFinish {
+		return repository.TrashRepository.FinishRestoreWithAudit(ctx, userID, id, event)
+	}
+	<-ctx.Done()
+	repository.primaryContextErr = ctx.Err()
+	return ctx.Err()
 }
 
 func (repository *clearMutationFailureRepository) ClearMutation(ctx context.Context, _ string, _ time.Time) error {

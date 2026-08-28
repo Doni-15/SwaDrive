@@ -87,6 +87,7 @@ type Service struct {
 	mutations          *storage.MutationCoordinator
 	audit              AuditRecorder
 	now                func() time.Time
+	repairTimeout      time.Duration
 	downloadSlots      chan struct{}
 	downloadAdmissions chan struct{}
 }
@@ -103,6 +104,7 @@ func NewService(storageManager Storage, trashRepository TrashRepository, indexRe
 	}
 	return &Service{
 		storage: storageManager, trash: trashRepository, index: indexRepository, mutations: mutationCoordinator, audit: auditRecorder, now: now,
+		repairTimeout:      mutationRepairTimeout,
 		downloadSlots:      make(chan struct{}, maxConcurrentDownloads),
 		downloadAdmissions: make(chan struct{}, maxConcurrentDownloads*4),
 	}
@@ -249,9 +251,15 @@ func (service *Service) runMutationRepair(requestContext context.Context, repair
 	// Once the durable intent exists, restoring consistency must not depend on
 	// the client remaining connected. Keep request values for tracing/audit, but
 	// bound every detached database repair so shutdown cannot wait forever.
-	repairContext, cancel := context.WithTimeout(context.WithoutCancel(requestContext), mutationRepairTimeout)
+	repairContext, cancel := context.WithTimeout(context.WithoutCancel(requestContext), service.repairTimeout)
 	defer cancel()
 	return repair(repairContext)
+}
+
+func (service *Service) markIndexUnhealthy(requestContext context.Context, reason string) error {
+	return service.runMutationRepair(requestContext, func(markerContext context.Context) error {
+		return service.index.MarkUnhealthy(markerContext, reason, service.now().UTC())
+	})
 }
 
 func (service *Service) Trash(ctx context.Context, identity auth.Identity, pathValue string) (TrashEntry, error) {
@@ -292,7 +300,7 @@ func (service *Service) Trash(ctx context.Context, identity auth.Identity, pathV
 		if commitErr == nil {
 			return nil
 		}
-		markErr := service.index.MarkUnhealthy(repairContext, trashHealthReason(entry.ID), service.now().UTC())
+		markErr := service.markIndexUnhealthy(repairContext, trashHealthReason(entry.ID))
 		return errors.Join(commitErr, markErr)
 	}); err != nil {
 		return TrashEntry{}, err
@@ -343,7 +351,7 @@ func (service *Service) Restore(ctx context.Context, identity auth.Identity, id 
 		if finishErr == nil {
 			return nil
 		}
-		markErr := service.index.MarkUnhealthy(repairContext, restoreHealthReason(entry.ID), service.now().UTC())
+		markErr := service.markIndexUnhealthy(repairContext, restoreHealthReason(entry.ID))
 		return errors.Join(finishErr, markErr)
 	}); err != nil {
 		return err

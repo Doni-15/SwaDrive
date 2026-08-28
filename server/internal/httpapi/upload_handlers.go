@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/hex"
 	"net/http"
 	"time"
@@ -8,7 +9,12 @@ import (
 	"github.com/Doni-15/SwaDrive/server/internal/uploads"
 )
 
-const chunkBodyReadTimeout = 5 * time.Minute
+const (
+	chunkBodyReadTimeout        = 5 * time.Minute
+	uploadOperationTimeout      = 5 * time.Minute
+	uploadResponseWriteTimeout  = 30 * time.Second
+	uploadOperationWriteTimeout = uploadOperationTimeout + uploadResponseWriteTimeout
+)
 
 type uploadResponse struct {
 	ID             string         `json:"id"`
@@ -96,6 +102,11 @@ func (server *server) putUploadChunk(w http.ResponseWriter, request *http.Reques
 		writeError(w, request, http.StatusBadRequest, "invalid_chunk_length", "The chunk length is incorrect.")
 		return
 	}
+	clearWriteDeadline, ok := server.beginUploadOperation(w, request)
+	if !ok {
+		return
+	}
+	defer clearWriteDeadline()
 	request.Body = http.MaxBytesReader(w, request.Body, expectedSize)
 	clearDeadline, err := installReadDeadline(w, chunkBodyReadTimeout)
 	if err != nil {
@@ -124,12 +135,30 @@ func (server *server) putUploadChunk(w http.ResponseWriter, request *http.Reques
 }
 
 func (server *server) completeUpload(w http.ResponseWriter, request *http.Request) {
-	upload, err := server.uploads.Complete(request.Context(), identity(request), request.PathValue("id"))
+	clearWriteDeadline, ok := server.beginUploadOperation(w, request)
+	if !ok {
+		return
+	}
+	defer clearWriteDeadline()
+	operationContext, cancel := context.WithTimeout(request.Context(), uploadOperationTimeout)
+	defer cancel()
+	upload, err := server.uploads.Complete(operationContext, identity(request), request.PathValue("id"))
 	if err != nil {
 		server.writeServiceError(w, request, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toUploadResponse(upload))
+}
+
+func (server *server) beginUploadOperation(w http.ResponseWriter, request *http.Request) (func(), bool) {
+	finishDeadline, err := installWriteDeadline(w, uploadOperationWriteTimeout, uploadResponseWriteTimeout)
+	if err == nil {
+		return finishDeadline, true
+	}
+	server.logger.ErrorContext(request.Context(), "upload write deadline unavailable", "request_id", requestID(request), "error_type", "write_deadline")
+	w.Header().Set("Retry-After", "1")
+	writeError(w, request, http.StatusServiceUnavailable, "server_busy", "The server could not start the upload operation.")
+	return nil, false
 }
 
 func (server *server) cancelUpload(w http.ResponseWriter, request *http.Request) {
