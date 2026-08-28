@@ -1,6 +1,8 @@
 # SwaDrive — Rilis Berikutnya
 
-Rilis stabil saat ini: `v1.0.0`
+Baseline production yang terdokumentasi: `v1.0.0`
+
+Source release terbaru: `v1.0.2`
 
 Target major berikutnya: `v2.0.0`
 
@@ -12,8 +14,8 @@ diuji, diverifikasi terhadap source code, dan dicatat dalam catatan rilis.
 
 ## Target
 
-Target major berikutnya adalah `v2.0.0`. Baseline stabil untuk production tetap
-`v1.0.0` sampai rilis baru secara resmi dinyatakan siap.
+Target major berikutnya adalah `v2.0.0`. Baseline deployment production yang
+terdokumentasi tetap `v1.0.0`; source terbaru berada pada patch `v1.0.2`.
 
 ## Aturan Perencanaan
 

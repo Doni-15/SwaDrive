@@ -7,29 +7,29 @@ file ke internet publik.
 
 Proyek ini menjadi sarana untuk mempraktikkan administrasi Linux, networking,
 isolasi service, least privilege, Go, Flutter, dan secure software engineering.
-Backend `v1.0.0` telah menjadi baseline untuk production. Patch keandalan
-`v1.0.1` disiapkan agar API tetap dapat dijangkau ketika content storage tidak
-tersedia, sedangkan alur produk Flutter masih berupa scaffold dan belum
-diimplementasikan.
+Backend `v1.0.0` telah menjadi baseline untuk production. Source terbaru
+`v1.0.2` menambahkan hardening konsistensi, timeout transfer, pemulihan
+credential owner, CI, serta deployment Docker yang reproducible. Alur produk
+Flutter masih berupa scaffold dan belum diimplementasikan.
 
 ## Status Proyek
 
 | Area | Status | Bukti/status |
 | --- | --- | --- |
-| Fondasi HTTP backend Go | Patch `v1.0.1` disiapkan | Health melaporkan storage dan degraded storage mode |
+| Fondasi HTTP backend Go | Source `v1.0.2` | Health/readiness terpisah, timeout request dan transfer |
 | Fondasi service di Linux | Production `v1.0.0` | `systemd` dan service account terbatas |
 | Jaringan privat | Production `v1.0.0` | Akses Tailscale dengan rule akses yang ketat |
 | Autentikasi aplikasi | Production `v1.0.0` | Argon2id, server-side session berbasis opaque token, pencabutan, limiter, dan audit log |
-| File API | Patch `v1.0.1` disiapkan | Operasi content fail-closed dengan `storage_unavailable` |
-| Resumable transfer | Patch `v1.0.1` disiapkan | Streaming fixed chunk tetap fail-closed saat storage tidak tersedia |
+| File API | Source `v1.0.2` | Operasi content dan metadata fail-closed sesuai state reconciliation |
+| Resumable transfer | Source `v1.0.2` | Stored chunk di-hash ulang dan repair pascapublikasi tidak mengikuti cancellation client |
 | Client Flutter | Scaffold | Belum memiliki login atau file browser |
-| Deployment backend | Production `v1.0.0` | Dirilis 2026-08-26 pada Debian dengan `systemd`, metadata pada NVMe, isi file pada HDD, dan Tailscale |
+| Deployment backend | `systemd` production + Docker opsional | Image distroless non-root, bind mount persisten, dan host binding privat |
 
 ## Rilis
 
-Baseline production saat ini: [SwaDrive `v1.0.0`](docs/releases/v1.0.0.md)
+Baseline production yang terdokumentasi: [SwaDrive `v1.0.0`](docs/releases/v1.0.0.md)
 
-Patch yang disiapkan: [SwaDrive `v1.0.1`](docs/releases/v1.0.1.md)
+Source release terbaru: [SwaDrive `v1.0.2`](docs/releases/v1.0.2.md)
 
 Target major berikutnya: [SwaDrive `v2.0.0`](docs/releases/NEXT.md)
 
@@ -43,7 +43,7 @@ kontribusi eksternal dan pull request tidak sedang diterima. Repository ini
 saat ini tidak menyediakan lisensi open source. Pelaporan kerentanan tetap
 ditangani secara terpisah melalui [kebijakan keamanan](SECURITY.md).
 
-Health endpoint `v1.0.1` melaporkan kesehatan proses dan ketersediaan content
+Health endpoint melaporkan kesehatan proses dan ketersediaan content
 storage secara terpisah:
 
 ```http
@@ -57,6 +57,12 @@ GET /api/v1/health
 Jika content storage tidak dapat diverifikasi, endpoint yang sama tetap
 merespons HTTP 200 dengan
 `{"status":"degraded","storage":"unavailable"}`.
+
+`GET /api/v1/ready` memeriksa database, kesehatan metadata index, dan startup
+reconciliation gate. Endpoint tersebut mengembalikan HTTP 503 `not_ready`
+ketika control/metadata plane belum aman untuk dilayani. Storage yang degraded
+tetap dilaporkan sebagai field terpisah karena proses sengaja mempertahankan
+API autentikasi saat HDD tidak tersedia.
 
 ## Tujuan
 
@@ -85,16 +91,17 @@ file-sharing service, atau pengganti administrasi melalui SSH.
 - metadata index SQLite yang dapat dibangun ulang untuk listing, pencarian, dan
   metadata tanpa melakukan tree scan pada HDD dalam operasi normal;
 - audit log append-only untuk aktivitas autentikasi, session, file, dan upload;
-- command lokal bagi administrator untuk melakukan bootstrap owner, reindex
-  metadata, dan melakukan reconciliation terhadap orphan upload part;
+- command lokal bagi administrator untuk bootstrap owner, mengganti password
+  owner sambil mencabut seluruh session, reindex metadata, dan melakukan
+  reconciliation terhadap orphan upload part;
 - degraded storage mode yang menjaga autentikasi, session, dan health tetap
   dapat dijangkau, sementara operasi content ditolak dengan HTTP 503 dan kode
   `storage_unavailable`.
 
-Backend telah melewati unit test dan integration test, `go vet`, race test,
-build statis untuk Linux, serta vulnerability scan yang tidak menemukan
-kerentanan yang diketahui dan dapat dijangkau pada saat verifikasi backend
-`v1.0.0`.
+Workflow CI menjalankan build, test, race detector, vet, format Go, format dan
+analyzer Flutter, widget test, serta build image Docker. Hasil suatu commit
+hanya boleh disebut lulus setelah workflow atau command lokal untuk commit
+tersebut benar-benar selesai.
 
 ## Arsitektur
 
@@ -157,13 +164,17 @@ Invariant file API:
 
 ```text
 SwaDrive/
+├── .github/workflows/ci.yml
 ├── CHANGELOG.md
 ├── client/                 scaffold Flutter untuk Linux dan Android
 ├── server/
 │   ├── cmd/server/
 │   ├── cmd/swadrive-admin/
+│   ├── cmd/swadrive-healthcheck/
 │   ├── internal/{admincli,audit,auth,config,database,files,httpapi,storage,uploads}/
+│   ├── Dockerfile
 │   └── go.mod
+├── compose.yaml
 ├── docs/
 │   ├── architecture.md
 │   ├── security-model.md
@@ -173,8 +184,7 @@ SwaDrive/
 └── README.md
 ```
 
-Struktur baru hanya ditambahkan ketika fitur nyata membutuhkannya. Repository
-tidak menyiapkan abstraksi, container, atau layer deployment spekulatif.
+Struktur baru hanya ditambahkan ketika fitur nyata membutuhkannya.
 
 ## Menjalankan Backend
 
@@ -200,7 +210,7 @@ go run ./cmd/server
 Konfigurasi opsional berikut memiliki default yang terbatas:
 
 ```text
-SWADRIVE_LISTEN_ADDRESS=:8080
+SWADRIVE_LISTEN_ADDRESS=127.0.0.1:8080
 SWADRIVE_STORAGE_RESERVE_BYTES=1073741824
 SWADRIVE_UPLOAD_CLEANUP_INTERVAL=15m
 SWADRIVE_MAX_CONCURRENT_ARGON2=4
@@ -233,13 +243,16 @@ Command administrasi lokal berikut bukan HTTP endpoint:
 
 ```bash
 go run ./cmd/swadrive-admin bootstrap-owner -database '<state-dir>/swadrive.db' -username '<owner>'
+go run ./cmd/swadrive-admin set-owner-password -database '<state-dir>/swadrive.db' -username '<owner>'
 go run ./cmd/swadrive-admin reindex -database '<state-dir>/swadrive.db' -storage '<storage-root>' -volume-id '<volume-id>'
 go run ./cmd/swadrive-admin reconcile-upload-parts -database '<state-dir>/swadrive.db' -storage '<storage-root>' -volume-id '<volume-id>'
 # Tinjau dry-run; tambahkan -apply hanya untuk menghapus orphan part yang lolos age/name/type policy.
 ```
 
-Secara default, server mendengarkan TCP `8080`. Health endpoint dapat diperiksa
-dari host yang diizinkan oleh kebijakan jaringan privat:
+Secara default, server hanya mendengarkan `127.0.0.1:8080`. Untuk akses langsung
+melalui tailnet, set alamat Tailscale host secara eksplisit; jangan memakai
+all-interface listener tanpa firewall dan batas jaringan yang telah diverifikasi.
+Health endpoint dapat diperiksa dari host:
 
 ```bash
 curl http://127.0.0.1:8080/api/v1/health
@@ -247,6 +260,19 @@ curl http://127.0.0.1:8080/api/v1/health
 
 Client harus membedakan kegagalan koneksi dari error API. Kontrak ringkas untuk
 scaffold Flutter tersedia dalam [README client](client/README.md).
+
+## Menjalankan Backend dengan Docker
+
+Image server dibangun secara multi-stage dari `server/Dockerfile`; runtime
+distroless hanya membawa tiga binary, berjalan sebagai UID/GID `65532`, dan
+tidak memuat source, Flutter output, `.git`, atau secret. `compose.yaml`
+menambahkan root filesystem read-only, drop seluruh capability, persistent bind
+mount untuk SQLite dan content, serta port host yang default ke loopback.
+
+Panduan persiapan directory/ownership, build, konfigurasi, Tailscale,
+start/stop, command admin, backup, dan update tersedia dalam
+[deployment Docker](docs/deployment-docker.md). Android/mobile Flutter tidak
+dijalankan sebagai container production.
 
 ## Menjalankan Scaffold Flutter
 

@@ -1,8 +1,8 @@
 # Model Keamanan SwaDrive
 
 Dokumen ini menjelaskan aset, trust boundary, identitas, kontrol keamanan, dan
-keterbatasan yang berlaku pada baseline SwaDrive `v1.0.0` beserta patch
-keandalan `v1.0.1`. Keputusan historis yang mendasarinya tetap dicatat dalam
+keterbatasan yang berlaku pada baseline SwaDrive `v1.0.0` beserta hardening
+source hingga `v1.0.2`. Keputusan historis yang mendasarinya tetap dicatat dalam
 [ADR](adr/README.md). Jalur untuk melaporkan kerentanan dijelaskan terpisah
 dalam [kebijakan keamanan](../SECURITY.md).
 
@@ -47,6 +47,11 @@ menghasilkan opaque bearer token acak 256-bit; server hanya menyimpan digest
 SHA-256 dari token tersebut. Setiap perangkat memiliki server-side session yang
 terpisah, dengan masa berlaku absolut 30 hari dan dapat dicabut secara
 independen.
+
+Administrator lokal dapat menjalankan `set-owner-password` di bawah process
+lock. Perintah ini mengganti hash password, mencabut seluruh session owner, dan
+menulis audit event dalam satu transaction; kegagalan audit/commit membatalkan
+seluruh perubahan.
 
 Middleware autentikasi membentuk identitas untuk request yang dilindungi.
 Keputusan otorisasi memakai identitas tersebut, bukan user ID dari request
@@ -103,6 +108,12 @@ jaringan privat.
 - startup tanpa volume content yang valid, health degraded, error khusus
   `storage_unavailable`, runtime storage loss, dan penolakan penulisan ke
   fallback root.
+- cancellation tepat setelah trash/restore/finalisasi/cancel tidak memutus
+  repair metadata; startup degraded menutup metadata gate jika reconciliation
+  filesystem masih pending.
+- body JSON/chunk dan writer download memiliki deadline terbatas; stored chunk
+  di-hash ulang saat completion meskipun whole checksum client tidak tersedia.
+- reset password owner mencabut seluruh session secara transaction-safe.
 
 ## Kebijakan Regression Test
 
@@ -130,7 +141,10 @@ Hashing bukan encryption.
 
 Argon2 (default 4), upload chunk (8), download (32), dan request login (64)
 masing-masing memiliki process-local concurrency gate. Request body untuk login
-dibatasi 64 KiB dengan read deadline khusus login selama 15 detik.
+dibatasi 64 KiB dengan read deadline khusus login selama 15 detik. Server
+memakai read/write timeout umum 30 detik; JSON body dibatasi 30 detik, chunk
+upload 5 menit, dan deadline writer download diperbarui hanya ketika progress
+masih terjadi.
 Listing/search/audit pagination, upload count, chunk count/size, DB pool,
 startup reconciliation, dan admin orphan scan juga dibatasi.
 
@@ -180,13 +194,16 @@ mensyaratkan umur minimum, nama `.part` acak yang ketat, regular file, ketiadaan
 entry database, dan opsi `-apply` eksplisit; operasi ini tidak pernah
 memublikasikan file.
 
-Pada `v1.0.1`, state ketersediaan storage aman untuk akses serentak dan hanya
+Pada `v1.0.2`, state ketersediaan storage aman untuk akses serentak dan hanya
 dapat bertransisi dari `available` ke `unavailable` selama proses berjalan. Probe
 memverifikasi marker, directory wajib, dan satu filesystem sebelum content
 access. Kegagalan probe menghasilkan error domain `storage.ErrUnavailable`,
 yang dipetakan menjadi HTTP 503 `storage_unavailable` tanpa path fisik,
 detail mount, nama perangkat, atau error kernel. Transisi state dicatat sekali;
-request berikutnya tidak menghasilkan log probe berulang yang berisik.
+request berikutnya tidak menghasilkan log probe berulang yang berisik. Health
+probe dibatasi paling sering sekali setiap lima detik; operasi content tetap
+melakukan validasi storage sendiri. Readiness memeriksa DB, index, dan pending
+reconciliation metadata secara terpisah.
 
 Provider tidak melakukan recovery otomatis. Setelah volume yang benar kembali,
 backend harus di-restart agar validasi storage, reconciliation trash/upload,
@@ -210,8 +227,14 @@ merupakan batas yang dapat ditulis service. Mode ownership yang tepat dan
 konfigurasi unit `systemd` bergantung pada deployment dan tidak dipublikasikan
 dalam repository.
 
+Profil Docker menjalankan image distroless sebagai UID/GID `65532`, root
+filesystem read-only, tanpa Linux capability, dan hanya menulis bind mount state
+serta content. Marker/root storage harus tetap dikendalikan operator host.
+Compose memublikasikan port ke loopback secara default; memilih alamat Tailscale
+host harus eksplisit dan tidak menggantikan autentikasi aplikasi.
+
 Content search, OCR, thumbnail, dan encryption at rest pada level aplikasi tidak
 tersedia. Backend `v1.0.0` menjadi baseline untuk production pada 2026-08-26;
-client Flutter tetap berupa scaffold. Patch `v1.0.1` tidak menyediakan
+client Flutter tetap berupa scaffold. Source `v1.0.2` tidak menyediakan
 pemulihan storage di dalam proses; restart backend tetap diperlukan setelah volume
 yang diharapkan kembali tersedia.

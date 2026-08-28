@@ -93,6 +93,13 @@ aman ketika HDD tidak dapat diverifikasi. Setiap operasi yang memerlukan byte
 atau mutasi content terlebih dahulu melewati provider tersebut dan menerima
 `storage.ErrUnavailable` jika batas storage tertutup.
 
+Pada `v1.0.2`, startup tetap memeriksa kesehatan index melalui SQLite ketika
+content storage tidak tersedia. Jika terdapat trash `trashing/restoring` atau
+upload `finalizing` yang membutuhkan filesystem untuk reconciliation, metadata
+gate ditutup dan endpoint metadata mengembalikan `metadata_unavailable`.
+Autentikasi dan session tetap tersedia. `GET /api/v1/ready` memeriksa database,
+index, dan gate ini tanpa menjadikan ketersediaan HDD sebagai liveness proses.
+
 ## Control Plane, Metadata Plane, dan Content Plane
 
 Isi file disimpan pada filesystem di content plane, bukan sebagai BLOB
@@ -155,9 +162,12 @@ finalisasi upload menyimpan transitional state agar reconciliation terarah dapat
 dilakukan saat startup. Mkdir dan move menandai metadata index sebagai unhealthy
 dalam durable state sebelum mutasi filesystem, lalu membersihkan tanda tersebut
 dalam transaction SQLite yang juga mengubah index dan audit log. Setelah intent
-di-commit, finalisasi menggunakan internal repair context yang terbatas dan
-tidak dibatalkan hanya karena request client terputus. Kegagalan repair
-internal tetap membiarkan index berstatus unhealthy. Crash di tengah operasi
+atau side effect filesystem terjadi, commit metadata, audit, compensation, dan
+fallback fail-closed memakai internal repair context yang terbatas dan tidak
+dibatalkan hanya karena request client terputus. Aturan ini berlaku untuk mkdir,
+move, trash, restore, complete, cancel, dan cleanup upload. Kegagalan repair
+internal tetap membiarkan transitional state atau index unhealthy. Crash di
+tengah operasi
 membuat startup fail-closed sampai reindex eksplisit dilakukan, bukan memicu
 HDD scan. Upload part yang dibuat sebelum DB commit tidak dipublikasikan;
 administrator dapat menjalankan `reconcile-upload-parts` dengan pembatasan
@@ -174,12 +184,17 @@ kesehatan metadata sebelum data plane tersedia kembali.
 
 ## Arsitektur Runtime dan Deployment
 
-Deployment di production menjalankan satu proses backend pada Debian sebagai
-service `systemd` dengan runtime service account terbatas. Akses aplikasi hanya
-diterima melalui tailnet privat. SQLite dan state operasional berada pada NVMe,
-sedangkan isi file berada pada HDD. Detail versi yang telah dirilis tersedia
-dalam [catatan rilis `v1.0.0`](releases/v1.0.0.md), sedangkan patch keandalan
-tersedia dalam [catatan rilis `v1.0.1`](releases/v1.0.1.md). Repository tidak
-melacak unit `systemd`; unit aktual harus mengizinkan backend dimulai tanpa HDD,
-tanpa mengurangi service account, permission, sandbox, firewall, atau batas
+Deployment production yang terdokumentasi menjalankan satu proses backend pada
+Debian sebagai service `systemd` dengan runtime service account terbatas.
+`v1.0.2` juga menyediakan profil Docker opsional: build multi-stage, runtime
+distroless UID/GID `65532`, root filesystem read-only, capability kosong, state
+dan content pada bind mount persisten, serta host port loopback sebagai default.
+Container bukan pengganti Tailscale/firewall dan tidak memuat client Flutter.
+Panduan operasional tersedia dalam [deployment Docker](deployment-docker.md).
+
+SQLite dan state operasional tetap berada pada storage cepat yang persisten,
+sedangkan isi file berada pada content volume yang persisten. Detail source
+terbaru tersedia dalam [catatan rilis `v1.0.2`](releases/v1.0.2.md). Unit
+`systemd` aktual tetap harus mengizinkan backend dimulai tanpa HDD tanpa
+mengurangi service account, permission, sandbox, firewall, atau batas
 Tailscale. Status client tersedia dalam [README](../README.md).

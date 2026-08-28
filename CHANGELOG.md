@@ -9,6 +9,38 @@ Target major berikutnya adalah `v2.0.0`.
 Belum ada fitur `v2.0.0` yang dicatat sebagai selesai. Lihat
 [penanda rilis `NEXT`](docs/releases/NEXT.md) untuk status perencanaan.
 
+## [v1.0.2] - 2026-08-28
+
+Patch keamanan, konsistensi, dan deployment yang memvalidasi ulang laporan
+full-project terhadap source repository saat ini.
+
+### Diperbaiki
+
+- Menyelesaikan commit/fallback metadata setelah trash, restore, complete,
+  cancel, dan cleanup upload memakai bounded internal repair context setelah
+  side effect filesystem.
+- Menutup metadata plane saat startup degraded menemukan trash atau upload
+  finalizing yang belum dapat direkonsiliasi.
+- Menambahkan timeout server, deadline body JSON/chunk, dan idle-progress
+  deadline download agar slot transfer tidak dapat ditahan tanpa batas.
+- Meng-hash ulang setiap stored chunk saat completion dan menyimpan SHA-256
+  keseluruhan file meskipun client tidak mengirim checksum opsional.
+- Mengubah default listener menjadi loopback; all-interface harus dipilih
+  secara eksplisit oleh deployment.
+- Menambahkan command lokal `set-owner-password` yang mengganti hash dan
+  mencabut seluruh session dalam transaction yang sama dengan audit event.
+- Membatasi frekuensi probe storage pada health dan menambahkan readiness
+  control/metadata plane pada `GET /api/v1/ready`.
+
+### Infrastruktur
+
+- Menambahkan image Docker multi-stage berbasis runtime distroless non-root,
+  health-check binary, `.dockerignore`, dan Compose hardened dengan persistent
+  bind mount dan host port privat.
+- Menambahkan CI dengan action yang dipin ke commit SHA untuk build/test/race/
+  vet Go, format/analyze/test Flutter, dan build Docker.
+- Menambahkan widget test untuk scaffold Flutter.
+
 ## [v1.0.1] - 2026-08-27
 
 Patch keandalan untuk menjaga control plane dan HTTP API tetap dapat

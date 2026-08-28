@@ -2,8 +2,9 @@
 
 ## Versi yang Didukung
 
-SwaDrive `v1.0.0` adalah baseline stabil di production saat ini. Perbaikan
-keamanan dikembangkan terhadap source code terbaru yang relevan dan wajib
+SwaDrive `v1.0.0` adalah baseline deployment production yang terdokumentasi;
+source keamanan terbaru adalah `v1.0.2`. Perbaikan keamanan dikembangkan
+terhadap source code terbaru yang relevan dan wajib
 mempertahankan invariant keamanan `v1.0.0` yang telah didokumentasikan.
 
 ## Melaporkan Kerentanan
@@ -58,8 +59,12 @@ DB/WAL/SHM.
 Deployment di production harus memastikan storage root yang ter-mount dan marker
 tetap dikendalikan administrator, sedangkan hanya batas penyimpanan `files/`,
 `uploads/`, dan `trash/` yang dapat ditulis oleh runtime service account. Mode
-permission yang tepat bergantung pada deployment dan tidak dipublikasikan dalam
-repository ini.
+permission systemd production tetap bergantung pada deployment. Profil Docker
+menjalankan UID/GID non-root `65532`, root filesystem read-only, tanpa Linux
+capability, dengan state/content pada bind mount yang dipersiapkan operator.
+Port Compose default hanya dipublikasikan ke loopback; akses tailnet harus
+memakai Tailscale Serve atau alamat Tailscale host yang dipilih eksplisit,
+bukan `0.0.0.0`.
 
 ## Informasi Sensitif
 
